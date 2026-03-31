@@ -1,0 +1,20 @@
+{
+  "name": "freight-bill-tracker-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --config wrangler.toml",
+    "build": "wrangler deploy --dry-run --outdir dist --config wrangler.toml",
+    "deploy": "wrangler deploy --config wrangler.toml",
+    "db:migrate": "wrangler d1 execute freight-bills-db --file=../schema.sql --config wrangler.toml",
+    "db:migrate:local": "wrangler d1 execute freight-bills-db --local --file=../schema.sql --config wrangler.toml"
+  },
+  "dependencies": {
+    "hono": "^4.12.9"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250327.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.79.0"
+  }
+}

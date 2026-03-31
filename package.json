@@ -1,0 +1,14 @@
+{
+  "name": "freight-bill-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=backend & npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+    "deploy": "npm run build && wrangler deploy --config backend/wrangler.toml"
+  }
+}
