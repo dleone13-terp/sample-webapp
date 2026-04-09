@@ -1,0 +1,12 @@
+name = "freight-bill-tracker"
+main = "src/index.ts"
+compatibility_date = "2025-03-31"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "freight-bills-db"
+database_id = "freight-bills-db-local"
+
+[assets]
+directory = "../frontend/dist"
