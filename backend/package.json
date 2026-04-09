@@ -10,6 +10,7 @@
     "db:migrate:local": "wrangler d1 execute freight-bills-db --local --file=../schema.sql --config wrangler.toml"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.12.9"
   },
   "devDependencies": {
