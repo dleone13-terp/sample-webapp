@@ -2,7 +2,7 @@ name: Deploy Preview Worker
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, closed]
+    types: [opened, reopened, synchronize, ready_for_review]
   push:
     branches-ignore:
       - main
@@ -24,7 +24,6 @@ jobs:
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       should_deploy: ${{ steps.resolve.outputs.should_deploy }}
-      is_pr_close: ${{ steps.resolve.outputs.is_pr_close }}
     steps:
       - name: Resolve PR context
         id: resolve
@@ -32,13 +31,11 @@ jobs:
         with:
           script: |
             const eventName = context.eventName;
-            const action = context.payload.action || '';
 
             if (eventName === 'pull_request') {
               const prNumber = String(context.payload.pull_request.number);
               core.setOutput('pr_number', prNumber);
-              core.setOutput('is_pr_close', action === 'closed' ? 'true' : 'false');
-              core.setOutput('should_deploy', action === 'closed' ? 'false' : 'true');
+              core.setOutput('should_deploy', 'true');
               return;
             }
 
@@ -55,13 +52,11 @@ jobs:
 
             if (result.data.length === 0) {
               core.setOutput('pr_number', '');
-              core.setOutput('is_pr_close', 'false');
               core.setOutput('should_deploy', 'false');
               return;
             }
 
             core.setOutput('pr_number', String(result.data[0].number));
-            core.setOutput('is_pr_close', 'false');
             core.setOutput('should_deploy', 'true');
 
   deploy-preview:
@@ -80,31 +75,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - name: Shared setup
+        uses: ./.github/actions/setup-cloudflare-node
         with:
-          node-version: 22
-          cache: npm
+          node-version: '22'
+          api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          require-pr-number: 'true'
+          pr-number: ${{ needs.resolve-pr.outputs.pr_number }}
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Validate Cloudflare credentials
+      - name: Validate preview Access secrets
         env:
-          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PREVIEW_TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PREVIEW }}
+          PREVIEW_POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PREVIEW }}
         run: |
           set -euo pipefail
-          if [ -z "${API_TOKEN}" ]; then
-            echo "Missing required secret: CLOUDFLARE_API_TOKEN" >&2
+          if [ -z "${PREVIEW_TEAM_DOMAIN}" ]; then
+            echo "Missing required secret: CF_ACCESS_TEAM_DOMAIN_PREVIEW" >&2
             exit 1
           fi
-          if [ -z "${ACCOUNT_ID}" ]; then
-            echo "Missing required secret: CLOUDFLARE_ACCOUNT_ID" >&2
+          if [ -z "${PREVIEW_POLICY_AUD}" ]; then
+            echo "Missing required secret: CF_ACCESS_POLICY_AUD_PREVIEW" >&2
             exit 1
           fi
-          if [ -z "${PR_NUMBER}" ]; then
-            echo "Unable to resolve PR number for preview deployment" >&2
+          if [[ "${PREVIEW_TEAM_DOMAIN}" != https://* ]]; then
+            echo "CF_ACCESS_TEAM_DOMAIN_PREVIEW must start with https://" >&2
+            exit 1
+          fi
+          if [[ "${PREVIEW_TEAM_DOMAIN}" == */ ]]; then
+            echo "CF_ACCESS_TEAM_DOMAIN_PREVIEW must not have a trailing slash" >&2
+            exit 1
+          fi
+          if [[ "${PREVIEW_POLICY_AUD}" == "replace-with-access-app-aud" ]]; then
+            echo "CF_ACCESS_POLICY_AUD_PREVIEW is still set to a placeholder value" >&2
             exit 1
           fi
 
@@ -204,59 +207,4 @@ jobs:
           {
             echo "### Preview deploy skipped"
             echo "- Reason: push to non-main branch with no open PR"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  cleanup-preview-db:
-    needs: resolve-pr
-    if: needs.resolve-pr.outputs.is_pr_close == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PR_NUMBER: ${{ needs.resolve-pr.outputs.pr_number }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Validate Cloudflare credentials
-        env:
-          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          if [ -z "${API_TOKEN}" ]; then
-            echo "Missing required secret: CLOUDFLARE_API_TOKEN" >&2
-            exit 1
-          fi
-          if [ -z "${ACCOUNT_ID}" ]; then
-            echo "Missing required secret: CLOUDFLARE_ACCOUNT_ID" >&2
-            exit 1
-          fi
-
-      - name: Delete PR-specific D1 database
-        run: |
-          set -euo pipefail
-          DB_NAME="freight-bills-pr-${PR_NUMBER}"
-          if ! npm exec --workspace=backend -- wrangler d1 delete "$DB_NAME" --skip-confirmation; then
-            echo "Failed to delete ${DB_NAME}. Listing visible D1 databases for diagnostics." >&2
-            npm exec --workspace=backend -- wrangler d1 list || true
-            exit 1
-          fi
-
-      - name: Summary
-        run: |
-          {
-            echo "### Preview cleanup"
-            echo "- PR: #${PR_NUMBER}"
-            echo "- Deleted database: freight-bills-pr-${PR_NUMBER}"
           } >> "$GITHUB_STEP_SUMMARY"

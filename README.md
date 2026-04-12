@@ -119,6 +119,8 @@ Deployments use the official Wrangler GitHub Action.
 
 - `.github/workflows/deploy-production.yml`: deploys on pushes to `main`
 - `.github/workflows/deploy-preview.yml`: deploys preview Workers on non-main branch pushes when an open PR exists, and on PR open/reopen/synchronize
+- `.github/workflows/deploy-preview-cleanup.yml`: deletes PR preview D1 database on PR close
+- `.github/actions/setup-cloudflare-node/action.yml`: shared setup action used by workflows for Node setup, dependency install, and Cloudflare credential validation
 
 Preview lifecycle:
 
@@ -163,6 +165,7 @@ CI troubleshooting:
 - If preview/prod workflow logs show Cloudflare API errors `10000` or `9106`, verify that `CLOUDFLARE_API_TOKEN` is valid, unexpired, and has account permissions for Workers and D1.
 - Verify `CLOUDFLARE_ACCOUNT_ID` matches the account where the Worker and D1 databases live.
 - A `SyntaxError` during JSON parsing after `wrangler d1 list --json` usually means Wrangler printed auth warnings/errors instead of JSON due to invalid credentials.
+- If preview deploy fails at "Validate preview Access secrets", verify `CF_ACCESS_TEAM_DOMAIN_PREVIEW` and `CF_ACCESS_POLICY_AUD_PREVIEW` exist, are plain strings (no quotes), and the team domain starts with `https://` without a trailing slash.
 
 ## Cloudflare Access Auth
 

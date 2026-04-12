@@ -1,0 +1,52 @@
+name: Cleanup Preview Worker Database
+
+on:
+  pull_request:
+    types: [closed]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cleanup-preview-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shared setup
+        uses: ./.github/actions/setup-cloudflare-node
+        with:
+          node-version: '22'
+          api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Delete PR-specific D1 database
+        run: |
+          set -euo pipefail
+          DB_NAME="freight-bills-pr-${PR_NUMBER}"
+          if ! npm exec --workspace=backend -- wrangler d1 delete "$DB_NAME" --skip-confirmation; then
+            echo "Failed to delete ${DB_NAME}. Listing visible D1 databases for diagnostics." >&2
+            npm exec --workspace=backend -- wrangler d1 list || true
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Preview cleanup"
+            echo "- PR: #${PR_NUMBER}"
+            echo "- Deleted database: freight-bills-pr-${PR_NUMBER}"
+          } >> "$GITHUB_STEP_SUMMARY"
