@@ -1,5 +1,8 @@
 export interface Env {
   DB: D1Database;
+  TEAM_DOMAIN?: string;
+  POLICY_AUD?: string;
+  JWT_VALIDATION_DISABLED?: string;
 }
 
 export interface Customer {

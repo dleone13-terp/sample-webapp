@@ -1,0 +1,88 @@
+name: Deploy Production Worker
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PROD_DB_NAME: freight-bills-db
+      PROD_DB_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID_PROD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend and backend bundle
+        run: npm run build
+
+      - name: Generate production Wrangler config for CI
+        run: |
+          cat > backend/wrangler.production.ci.toml <<EOF
+          name = "freight-bill-tracker"
+          main = "src/index.ts"
+          compatibility_date = "2025-03-31"
+          compatibility_flags = ["nodejs_compat"]
+
+          [vars]
+          JWT_VALIDATION_DISABLED = "false"
+
+          [[d1_databases]]
+          binding = "DB"
+          database_name = "${PROD_DB_NAME}"
+          database_id = "${PROD_DB_ID}"
+
+          [assets]
+          directory = "../frontend/dist"
+          EOF
+
+      - name: Apply D1 migrations (production)
+        run: npm exec --workspace=backend -- wrangler d1 migrations apply "${PROD_DB_NAME}" --remote --config wrangler.production.ci.toml
+
+      - name: Deploy production Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+          command: deploy --config wrangler.production.ci.toml
+          secrets: |
+            POLICY_AUD
+            TEAM_DOMAIN
+        env:
+          POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PROD }}
+          TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PROD }}
+
+      - name: Summary
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          {
+            echo "### Production deploy"
+            echo "- Worker: freight-bill-tracker"
+            echo "- Database: ${PROD_DB_NAME}"
+            echo "- Deployment URL: ${DEPLOYMENT_URL:-n/a}"
+            echo "- Migrations: applied before deploy"
+          } >> "$GITHUB_STEP_SUMMARY"

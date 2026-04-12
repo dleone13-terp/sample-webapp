@@ -3,6 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2025-03-31"
 compatibility_flags = ["nodejs_compat"]
 
+[vars]
+TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
+POLICY_AUD = "replace-with-access-app-aud"
+JWT_VALIDATION_DISABLED = "false"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "freight-bills-db"

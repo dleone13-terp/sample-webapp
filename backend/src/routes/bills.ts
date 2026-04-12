@@ -1,4 +1,7 @@
 import { Hono } from 'hono';
+import { and, asc, desc, eq, getTableColumns, like, or, sql } from 'drizzle-orm';
+import type { SQL } from 'drizzle-orm';
+import { getDb, schema } from '../db';
 import type { Env } from '../types';
 import type { Bill, BillStatus } from '../types';
 import { STATUS_TRANSITIONS } from '../types';
@@ -19,123 +22,127 @@ function generateBillNumber(): string {
 
 // GET /api/bills
 bills.get('/', async (c) => {
+  const db = getDb(c.env.DB);
   const status = c.req.query('status');
   const customerId = c.req.query('customer_id');
   const search = c.req.query('search');
 
-  let query = `
-    SELECT b.*, c.name as customer_name, c.company as customer_company
-    FROM bills b
-    LEFT JOIN customers c ON b.customer_id = c.id
-    WHERE 1=1
-  `;
-  const params: (string | number)[] = [];
-
+  const filters: SQL[] = [];
   if (status) {
-    query += ' AND b.status = ?';
-    params.push(status);
+    filters.push(eq(schema.bills.status, status as BillStatus));
   }
   if (customerId) {
-    query += ' AND b.customer_id = ?';
-    params.push(Number(customerId));
+    filters.push(eq(schema.bills.customer_id, Number(customerId)));
   }
   if (search) {
-    query += ' AND (b.bill_number LIKE ? OR b.tracking_number LIKE ? OR b.carrier LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    const pattern = `%${search}%`;
+    filters.push(
+      or(
+        like(schema.bills.bill_number, pattern),
+        like(schema.bills.tracking_number, pattern),
+        like(schema.bills.carrier, pattern)
+      ) as SQL
+    );
   }
 
-  query += ' ORDER BY b.created_at DESC';
+  const whereClause = filters.length > 0 ? and(...filters) : undefined;
+  const billColumns = getTableColumns(schema.bills);
 
-  const { results } = await c.env.DB.prepare(query)
-    .bind(...params)
-    .all<Bill & { customer_name: string; customer_company: string }>();
+  const results = await db
+    .select({
+      ...billColumns,
+      customer_name: schema.customers.name,
+      customer_company: schema.customers.company,
+    })
+    .from(schema.bills)
+    .leftJoin(schema.customers, eq(schema.bills.customer_id, schema.customers.id))
+    .where(whereClause)
+    .orderBy(desc(schema.bills.created_at));
 
   return c.json(results);
 });
 
 // GET /api/bills/:id
 bills.get('/:id', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const bill = await c.env.DB.prepare(
-    `SELECT b.*, c.name as customer_name, c.company as customer_company,
-            c.email as customer_email, c.phone as customer_phone
-     FROM bills b
-     LEFT JOIN customers c ON b.customer_id = c.id
-     WHERE b.id = ?`
-  )
-    .bind(id)
-    .first<Bill & { customer_name: string; customer_company: string; customer_email: string; customer_phone: string }>();
+  const billColumns = getTableColumns(schema.bills);
+  const [bill] = await db
+    .select({
+      ...billColumns,
+      customer_name: schema.customers.name,
+      customer_company: schema.customers.company,
+      customer_email: schema.customers.email,
+      customer_phone: schema.customers.phone,
+    })
+    .from(schema.bills)
+    .leftJoin(schema.customers, eq(schema.bills.customer_id, schema.customers.id))
+    .where(eq(schema.bills.id, id))
+    .limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
   // Fetch documents and events
-  const { results: documents } = await c.env.DB.prepare(
-    'SELECT * FROM bill_documents WHERE bill_id = ? ORDER BY uploaded_at DESC'
-  )
-    .bind(id)
-    .all();
+  const documents = await db
+    .select()
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id))
+    .orderBy(desc(schema.billDocuments.uploaded_at));
 
-  const { results: events } = await c.env.DB.prepare(
-    'SELECT * FROM bill_events WHERE bill_id = ? ORDER BY created_at ASC'
-  )
-    .bind(id)
-    .all();
+  const events = await db
+    .select()
+    .from(schema.billEvents)
+    .where(eq(schema.billEvents.bill_id, id))
+    .orderBy(asc(schema.billEvents.created_at));
 
   return c.json({ ...bill, documents, events });
 });
 
 // POST /api/bills
 bills.post('/', async (c) => {
+  const db = getDb(c.env.DB);
   const body = await c.req.json<Partial<Bill>>();
 
   const billNumber = body.bill_number?.trim() || generateBillNumber();
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO bills (
-       bill_number, customer_id, status, carrier, tracking_number, service_type,
-       freight_class, origin_address, origin_city, origin_state, origin_zip,
-       destination_address, destination_city, destination_state, destination_zip,
-       weight, weight_unit, pieces, description, amount, currency,
-       pickup_date, estimated_delivery
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     RETURNING *`
-  )
-    .bind(
-      billNumber,
-      body.customer_id ?? null,
-      'draft',
-      body.carrier ?? null,
-      body.tracking_number ?? null,
-      body.service_type ?? null,
-      body.freight_class ?? null,
-      body.origin_address ?? null,
-      body.origin_city ?? null,
-      body.origin_state ?? null,
-      body.origin_zip ?? null,
-      body.destination_address ?? null,
-      body.destination_city ?? null,
-      body.destination_state ?? null,
-      body.destination_zip ?? null,
-      body.weight ?? null,
-      body.weight_unit ?? 'lbs',
-      body.pieces ?? null,
-      body.description ?? null,
-      body.amount ?? null,
-      body.currency ?? 'USD',
-      body.pickup_date ?? null,
-      body.estimated_delivery ?? null
-    )
-    .first<Bill>();
+  const [result] = await db
+    .insert(schema.bills)
+    .values({
+      bill_number: billNumber,
+      customer_id: body.customer_id ?? null,
+      status: 'draft',
+      carrier: body.carrier ?? null,
+      tracking_number: body.tracking_number ?? null,
+      service_type: body.service_type ?? null,
+      freight_class: body.freight_class ?? null,
+      origin_address: body.origin_address ?? null,
+      origin_city: body.origin_city ?? null,
+      origin_state: body.origin_state ?? null,
+      origin_zip: body.origin_zip ?? null,
+      destination_address: body.destination_address ?? null,
+      destination_city: body.destination_city ?? null,
+      destination_state: body.destination_state ?? null,
+      destination_zip: body.destination_zip ?? null,
+      weight: body.weight ?? null,
+      weight_unit: body.weight_unit ?? 'lbs',
+      pieces: body.pieces ?? null,
+      description: body.description ?? null,
+      amount: body.amount ?? null,
+      currency: body.currency ?? 'USD',
+      pickup_date: body.pickup_date ?? null,
+      estimated_delivery: body.estimated_delivery ?? null,
+    })
+    .returning();
 
   // Record creation event
   if (result) {
-    await c.env.DB.prepare(
-      `INSERT INTO bill_events (bill_id, event_type, to_status, description)
-       VALUES (?, 'created', 'draft', 'Bill created')`
-    )
-      .bind(result.id)
-      .run();
+    await db.insert(schema.billEvents).values({
+      bill_id: result.id,
+      event_type: 'created',
+      to_status: 'draft',
+      description: 'Bill created',
+    });
   }
 
   return c.json(result, 201);
@@ -143,58 +150,50 @@ bills.post('/', async (c) => {
 
 // PUT /api/bills/:id
 bills.put('/:id', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
   const body = await c.req.json<Partial<Bill>>();
 
-  const existing = await c.env.DB.prepare('SELECT * FROM bills WHERE id = ?')
-    .bind(id)
-    .first<Bill>();
+  const [existing] = await db.select().from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!existing) return c.json({ error: 'Bill not found' }, 404);
 
-  const result = await c.env.DB.prepare(
-    `UPDATE bills SET
-       customer_id = ?, carrier = ?, tracking_number = ?, service_type = ?,
-       freight_class = ?, origin_address = ?, origin_city = ?, origin_state = ?, origin_zip = ?,
-       destination_address = ?, destination_city = ?, destination_state = ?, destination_zip = ?,
-       weight = ?, weight_unit = ?, pieces = ?, description = ?, amount = ?, currency = ?,
-       pickup_date = ?, estimated_delivery = ?, actual_delivery = ?,
-       updated_at = datetime('now')
-     WHERE id = ?
-     RETURNING *`
-  )
-    .bind(
-      body.customer_id ?? existing.customer_id,
-      body.carrier ?? existing.carrier,
-      body.tracking_number ?? existing.tracking_number,
-      body.service_type ?? existing.service_type,
-      body.freight_class ?? existing.freight_class,
-      body.origin_address ?? existing.origin_address,
-      body.origin_city ?? existing.origin_city,
-      body.origin_state ?? existing.origin_state,
-      body.origin_zip ?? existing.origin_zip,
-      body.destination_address ?? existing.destination_address,
-      body.destination_city ?? existing.destination_city,
-      body.destination_state ?? existing.destination_state,
-      body.destination_zip ?? existing.destination_zip,
-      body.weight ?? existing.weight,
-      body.weight_unit ?? existing.weight_unit,
-      body.pieces ?? existing.pieces,
-      body.description ?? existing.description,
-      body.amount ?? existing.amount,
-      body.currency ?? existing.currency,
-      body.pickup_date ?? existing.pickup_date,
-      body.estimated_delivery ?? existing.estimated_delivery,
-      body.actual_delivery ?? existing.actual_delivery,
-      id
-    )
-    .first<Bill>();
+  const [result] = await db
+    .update(schema.bills)
+    .set({
+      customer_id: body.customer_id ?? existing.customer_id,
+      carrier: body.carrier ?? existing.carrier,
+      tracking_number: body.tracking_number ?? existing.tracking_number,
+      service_type: body.service_type ?? existing.service_type,
+      freight_class: body.freight_class ?? existing.freight_class,
+      origin_address: body.origin_address ?? existing.origin_address,
+      origin_city: body.origin_city ?? existing.origin_city,
+      origin_state: body.origin_state ?? existing.origin_state,
+      origin_zip: body.origin_zip ?? existing.origin_zip,
+      destination_address: body.destination_address ?? existing.destination_address,
+      destination_city: body.destination_city ?? existing.destination_city,
+      destination_state: body.destination_state ?? existing.destination_state,
+      destination_zip: body.destination_zip ?? existing.destination_zip,
+      weight: body.weight ?? existing.weight,
+      weight_unit: body.weight_unit ?? existing.weight_unit,
+      pieces: body.pieces ?? existing.pieces,
+      description: body.description ?? existing.description,
+      amount: body.amount ?? existing.amount,
+      currency: body.currency ?? existing.currency,
+      pickup_date: body.pickup_date ?? existing.pickup_date,
+      estimated_delivery: body.estimated_delivery ?? existing.estimated_delivery,
+      actual_delivery: body.actual_delivery ?? existing.actual_delivery,
+      updated_at: sql`datetime('now')`,
+    })
+    .where(eq(schema.bills.id, id))
+    .returning();
 
   return c.json(result);
 });
 
 // PUT /api/bills/:id/status
 bills.put('/:id/status', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
   const { status, description, created_by } = await c.req.json<{
     status: BillStatus;
@@ -202,9 +201,7 @@ bills.put('/:id/status', async (c) => {
     created_by?: string;
   }>();
 
-  const bill = await c.env.DB.prepare('SELECT * FROM bills WHERE id = ?')
-    .bind(id)
-    .first<Bill>();
+  const [bill] = await db.select().from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
@@ -219,85 +216,76 @@ bills.put('/:id/status', async (c) => {
     );
   }
 
-  // Set actual_delivery if transitioning to delivered
-  const actualDelivery =
-    status === 'delivered' ? `datetime('now')` : 'actual_delivery';
-
-  const result = await c.env.DB.prepare(
-    `UPDATE bills
-     SET status = ?,
-         actual_delivery = CASE WHEN ? = 'delivered' THEN datetime('now') ELSE actual_delivery END,
-         updated_at = datetime('now')
-     WHERE id = ?
-     RETURNING *`
-  )
-    .bind(status, status, id)
-    .first<Bill>();
+  const [result] = await db
+    .update(schema.bills)
+    .set({
+      status,
+      actual_delivery: status === 'delivered' ? sql`datetime('now')` : bill.actual_delivery,
+      updated_at: sql`datetime('now')`,
+    })
+    .where(eq(schema.bills.id, id))
+    .returning();
 
   // Record event
-  await c.env.DB.prepare(
-    `INSERT INTO bill_events (bill_id, event_type, from_status, to_status, description, created_by)
-     VALUES (?, 'status_change', ?, ?, ?, ?)`
-  )
-    .bind(
-      id,
-      bill.status,
-      status,
-      description ?? `Status changed to ${status}`,
-      created_by ?? 'user'
-    )
-    .run();
+  await db.insert(schema.billEvents).values({
+    bill_id: id,
+    event_type: 'status_change',
+    from_status: bill.status,
+    to_status: status,
+    description: description ?? `Status changed to ${status}`,
+    created_by: created_by ?? 'user',
+  });
 
   return c.json(result);
 });
 
 // DELETE /api/bills/:id
 bills.delete('/:id', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const existing = await c.env.DB.prepare('SELECT id FROM bills WHERE id = ?')
-    .bind(id)
-    .first();
+  const [existing] = await db.select({ id: schema.bills.id }).from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!existing) return c.json({ error: 'Bill not found' }, 404);
 
-  await c.env.DB.prepare('DELETE FROM bills WHERE id = ?').bind(id).run();
+  await db.delete(schema.bills).where(eq(schema.bills.id, id));
   return c.json({ success: true });
 });
 
 // GET /api/bills/:id/events
 bills.get('/:id/events', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const { results } = await c.env.DB.prepare(
-    'SELECT * FROM bill_events WHERE bill_id = ? ORDER BY created_at ASC'
-  )
-    .bind(id)
-    .all();
+  const results = await db
+    .select()
+    .from(schema.billEvents)
+    .where(eq(schema.billEvents.bill_id, id))
+    .orderBy(asc(schema.billEvents.created_at));
 
   return c.json(results);
 });
 
 // GET /api/bills/:id/documents
 bills.get('/:id/documents', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const { results } = await c.env.DB.prepare(
-    'SELECT * FROM bill_documents WHERE bill_id = ? ORDER BY uploaded_at DESC'
-  )
-    .bind(id)
-    .all();
+  const results = await db
+    .select()
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id))
+    .orderBy(desc(schema.billDocuments.uploaded_at));
 
   return c.json(results);
 });
 
 // POST /api/bills/:id/documents
 bills.post('/:id/documents', async (c) => {
+  const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const bill = await c.env.DB.prepare('SELECT id FROM bills WHERE id = ?')
-    .bind(id)
-    .first();
+  const [bill] = await db.select({ id: schema.bills.id }).from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
@@ -313,55 +301,49 @@ bills.post('/:id/documents', async (c) => {
     return c.json({ error: 'filename is required' }, 400);
   }
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO bill_documents (bill_id, filename, content_type, file_size, document_type, notes)
-     VALUES (?, ?, ?, ?, ?, ?)
-     RETURNING *`
-  )
-    .bind(
-      id,
-      body.filename.trim(),
-      body.content_type ?? null,
-      body.file_size ?? null,
-      body.document_type ?? null,
-      body.notes ?? null
-    )
-    .first();
+  const [result] = await db
+    .insert(schema.billDocuments)
+    .values({
+      bill_id: id,
+      filename: body.filename.trim(),
+      content_type: body.content_type ?? null,
+      file_size: body.file_size ?? null,
+      document_type: body.document_type ?? null,
+      notes: body.notes ?? null,
+    })
+    .returning();
 
   // Record event
-  await c.env.DB.prepare(
-    `INSERT INTO bill_events (bill_id, event_type, description)
-     VALUES (?, 'document_added', ?)`
-  )
-    .bind(id, `Document uploaded: ${body.filename}`)
-    .run();
+  await db.insert(schema.billEvents).values({
+    bill_id: id,
+    event_type: 'document_added',
+    description: `Document uploaded: ${body.filename}`,
+  });
 
   return c.json(result, 201);
 });
 
 // DELETE /api/bills/:id/documents/:docId
 bills.delete('/:id/documents/:docId', async (c) => {
+  const db = getDb(c.env.DB);
   const billId = Number(c.req.param('id'));
   const docId = Number(c.req.param('docId'));
 
-  const existing = await c.env.DB.prepare(
-    'SELECT * FROM bill_documents WHERE id = ? AND bill_id = ?'
-  )
-    .bind(docId, billId)
-    .first<{ filename: string }>();
+  const [existing] = await db
+    .select({ filename: schema.billDocuments.filename })
+    .from(schema.billDocuments)
+    .where(and(eq(schema.billDocuments.id, docId), eq(schema.billDocuments.bill_id, billId)))
+    .limit(1);
 
   if (!existing) return c.json({ error: 'Document not found' }, 404);
 
-  await c.env.DB.prepare('DELETE FROM bill_documents WHERE id = ?')
-    .bind(docId)
-    .run();
+  await db.delete(schema.billDocuments).where(eq(schema.billDocuments.id, docId));
 
-  await c.env.DB.prepare(
-    `INSERT INTO bill_events (bill_id, event_type, description)
-     VALUES (?, 'document_removed', ?)`
-  )
-    .bind(billId, `Document removed: ${existing.filename}`)
-    .run();
+  await db.insert(schema.billEvents).values({
+    bill_id: billId,
+    event_type: 'document_removed',
+    description: `Document removed: ${existing.filename}`,
+  });
 
   return c.json({ success: true });
 });

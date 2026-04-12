@@ -1,0 +1,219 @@
+name: Deploy Preview Worker
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
+      is_pr_close: ${{ steps.resolve.outputs.is_pr_close }}
+    steps:
+      - name: Resolve PR context
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventName = context.eventName;
+            const action = context.payload.action || '';
+
+            if (eventName === 'pull_request') {
+              const prNumber = String(context.payload.pull_request.number);
+              core.setOutput('pr_number', prNumber);
+              core.setOutput('is_pr_close', action === 'closed' ? 'true' : 'false');
+              core.setOutput('should_deploy', action === 'closed' ? 'false' : 'true');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = context.ref.replace('refs/heads/', '');
+            const result = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              head: `${owner}:${branch}`,
+              per_page: 1,
+            });
+
+            if (result.data.length === 0) {
+              core.setOutput('pr_number', '');
+              core.setOutput('is_pr_close', 'false');
+              core.setOutput('should_deploy', 'false');
+              return;
+            }
+
+            core.setOutput('pr_number', String(result.data[0].number));
+            core.setOutput('is_pr_close', 'false');
+            core.setOutput('should_deploy', 'true');
+
+  deploy-preview:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PR_NUMBER: ${{ needs.resolve-pr.outputs.pr_number }}
+    outputs:
+      db_name: ${{ steps.db.outputs.db_name }}
+      worker_name: ${{ steps.db.outputs.worker_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend and backend bundle
+        run: npm run build
+
+      - name: Create or resolve PR-specific D1 database
+        id: db
+        run: |
+          set -euo pipefail
+          DB_NAME="freight-bills-pr-${PR_NUMBER}"
+          WORKER_NAME="freight-bill-tracker-pr-${PR_NUMBER}"
+
+          DB_ID=$(npm exec --workspace=backend -- wrangler d1 list --json | node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(0,'utf8'));const name=process.argv[1];const match=data.find((db)=>db.name===name);process.stdout.write(match?match.uuid:'');" "$DB_NAME")
+
+          if [ -z "$DB_ID" ]; then
+            npm exec --workspace=backend -- wrangler d1 create "$DB_NAME"
+            DB_ID=$(npm exec --workspace=backend -- wrangler d1 list --json | node -e "const fs=require('fs');const data=JSON.parse(fs.readFileSync(0,'utf8'));const name=process.argv[1];const match=data.find((db)=>db.name===name);process.stdout.write(match?match.uuid:'');" "$DB_NAME")
+          fi
+
+          if [ -z "$DB_ID" ]; then
+            echo "Could not resolve D1 database ID for ${DB_NAME}" >&2
+            exit 1
+          fi
+
+          echo "db_name=${DB_NAME}" >> "$GITHUB_OUTPUT"
+          echo "db_id=${DB_ID}" >> "$GITHUB_OUTPUT"
+          echo "worker_name=${WORKER_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate preview Wrangler config for CI
+        env:
+          DB_NAME: ${{ steps.db.outputs.db_name }}
+          DB_ID: ${{ steps.db.outputs.db_id }}
+          WORKER_NAME: ${{ steps.db.outputs.worker_name }}
+        run: |
+          cat > backend/wrangler.preview.ci.toml <<EOF
+          name = "${WORKER_NAME}"
+          main = "src/index.ts"
+          compatibility_date = "2025-03-31"
+          compatibility_flags = ["nodejs_compat"]
+
+          [vars]
+          JWT_VALIDATION_DISABLED = "false"
+
+          [[d1_databases]]
+          binding = "DB"
+          database_name = "${DB_NAME}"
+          database_id = "${DB_ID}"
+
+          [assets]
+          directory = "../frontend/dist"
+          EOF
+
+      - name: Apply D1 migrations (preview)
+        env:
+          DB_NAME: ${{ steps.db.outputs.db_name }}
+        run: npm exec --workspace=backend -- wrangler d1 migrations apply "${DB_NAME}" --remote --config wrangler.preview.ci.toml
+
+      - name: Deploy preview Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+          command: deploy --config wrangler.preview.ci.toml
+          secrets: |
+            POLICY_AUD
+            TEAM_DOMAIN
+        env:
+          POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PREVIEW }}
+          TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PREVIEW }}
+
+      - name: Summary
+        env:
+          DB_NAME: ${{ steps.db.outputs.db_name }}
+          WORKER_NAME: ${{ steps.db.outputs.worker_name }}
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          {
+            echo "### Preview deploy"
+            echo "- PR: #${PR_NUMBER}"
+            echo "- Worker: ${WORKER_NAME}"
+            echo "- Database: ${DB_NAME}"
+            echo "- Deployment URL: ${DEPLOYMENT_URL:-n/a}"
+            echo "- Migrations: applied before deploy"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  skip-no-pr:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.should_deploy != 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No open PR for branch
+        run: |
+          {
+            echo "### Preview deploy skipped"
+            echo "- Reason: push to non-main branch with no open PR"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup-preview-db:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.is_pr_close == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PR_NUMBER: ${{ needs.resolve-pr.outputs.pr_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Delete PR-specific D1 database
+        run: |
+          DB_NAME="freight-bills-pr-${PR_NUMBER}"
+          npm exec --workspace=backend -- wrangler d1 delete "$DB_NAME" --skip-confirmation
+
+      - name: Summary
+        run: |
+          {
+            echo "### Preview cleanup"
+            echo "- PR: #${PR_NUMBER}"
+            echo "- Deleted database: freight-bills-pr-${PR_NUMBER}"
+          } >> "$GITHUB_STEP_SUMMARY"
