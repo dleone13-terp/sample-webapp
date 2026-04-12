@@ -158,6 +158,12 @@ Notes:
 - Production and preview must use different Access AUD values.
 - Enter secret values as plain strings in GitHub (no surrounding quotes).
 
+CI troubleshooting:
+
+- If preview/prod workflow logs show Cloudflare API errors `10000` or `9106`, verify that `CLOUDFLARE_API_TOKEN` is valid, unexpired, and has account permissions for Workers and D1.
+- Verify `CLOUDFLARE_ACCOUNT_ID` matches the account where the Worker and D1 databases live.
+- A `SyntaxError` during JSON parsing after `wrangler d1 list --json` usually means Wrangler printed auth warnings/errors instead of JSON due to invalid credentials.
+
 ## Cloudflare Access Auth
 
 This app uses Cloudflare Access in front of the Worker for both SPA and API traffic.
