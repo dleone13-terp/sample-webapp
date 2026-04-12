@@ -63,11 +63,7 @@ export const billDocuments = sqliteTable(
     bill_id: integer('bill_id')
       .notNull()
       .references(() => bills.id, { onDelete: 'cascade' }),
-    filename: text('filename').notNull(),
-    content_type: text('content_type'),
-    file_size: integer('file_size'),
-    document_type: text('document_type'),
-    notes: text('notes'),
+    r2_object_key: text('r2_object_key').notNull(),
     uploaded_at: text('uploaded_at').notNull().default(sql`(datetime('now'))`),
   },
   (table) => [index('idx_bill_documents_bill_id').on(table.bill_id)]

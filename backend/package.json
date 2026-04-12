@@ -4,12 +4,19 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev --config wrangler.toml",
-    "build": "wrangler deploy --dry-run --outdir dist --config wrangler.toml",
-    "deploy": "wrangler deploy --config wrangler.toml",
+    "dev:staging": "wrangler dev --env staging --config wrangler.toml",
+    "dev:production": "wrangler dev --env production --config wrangler.toml",
+    "build": "wrangler deploy --dry-run --outdir dist --env='' --config wrangler.toml",
+    "build:staging": "wrangler deploy --dry-run --outdir dist --env staging --config wrangler.toml",
+    "build:production": "wrangler deploy --dry-run --outdir dist --env production --config wrangler.toml",
+    "deploy": "wrangler deploy --env production --config wrangler.toml",
+    "deploy:staging": "wrangler deploy --env staging --config wrangler.toml",
+    "deploy:production": "wrangler deploy --env production --config wrangler.toml",
     "db:create": "wrangler d1 create freight-bills-db --config wrangler.toml",
     "db:create:staging": "wrangler d1 create freight-bills-staging --config wrangler.toml",
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
-    "db:migrate": "wrangler d1 migrations apply freight-bills-db --config wrangler.toml",
+    "db:migrate": "wrangler d1 migrations apply freight-bills-db --env production --config wrangler.toml",
+    "db:migrate:staging": "wrangler d1 migrations apply freight-bills-staging --env staging --config wrangler.toml",
     "db:migrate:local": "wrangler d1 migrations apply freight-bills-db --local --config wrangler.toml"
   },
   "dependencies": {

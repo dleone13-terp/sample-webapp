@@ -9,10 +9,15 @@
   "scripts": {
     "dev": "npm run dev --workspace=backend & npm run dev --workspace=frontend",
     "build": "npm run build --workspace=frontend && npm run build --workspace=backend",
-    "deploy": "npm run build && npm run deploy --workspace=backend",
+    "build:staging": "npm run build --workspace=frontend && npm run build:staging --workspace=backend",
+    "build:production": "npm run build --workspace=frontend && npm run build:production --workspace=backend",
+    "deploy": "npm run build:production && npm run deploy:production --workspace=backend",
+    "deploy:staging": "npm run build:staging && npm run deploy:staging --workspace=backend",
+    "deploy:production": "npm run build:production && npm run deploy:production --workspace=backend",
     "db:create": "npm run db:create --workspace=backend",
     "db:generate": "npm run db:generate --workspace=backend",
     "db:migrate": "npm run db:migrate --workspace=backend",
+    "db:migrate:staging": "npm run db:migrate:staging --workspace=backend",
     "db:migrate:local": "npm run db:migrate:local --workspace=backend"
   }
 }

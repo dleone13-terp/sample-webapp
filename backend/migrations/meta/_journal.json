@@ -8,6 +8,20 @@
       "when": 1775772688257,
       "tag": "0000_living_franklin_richards",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1776004610085,
+      "tag": "0001_stale_swordsman",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1776004915964,
+      "tag": "0002_ordinary_lake",
+      "breakpoints": true
     }
   ]
 }

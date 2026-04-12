@@ -15,10 +15,7 @@ export default function BillDetailPage() {
   const [transitioning, setTransitioning] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [docForm, setDocForm] = useState({
-    filename: '',
-    document_type: '',
-    content_type: '',
-    notes: '',
+    file: null as File | null,
   });
   const [uploadError, setUploadError] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -54,20 +51,18 @@ export default function BillDetailPage() {
 
   async function handleDocumentUpload(e: React.FormEvent) {
     e.preventDefault();
-    if (!bill || !docForm.filename.trim()) {
-      setUploadError('Filename is required');
+    if (!bill || !docForm.file) {
+      setUploadError('Please choose a file');
       return;
     }
     setUploading(true);
     setUploadError('');
     try {
-      await billsApi.addDocument(bill.id, {
-        filename: docForm.filename.trim(),
-        document_type: docForm.document_type || undefined,
-        content_type: docForm.content_type || undefined,
-        notes: docForm.notes || undefined,
-      });
-      setDocForm({ filename: '', document_type: '', content_type: '', notes: '' });
+      const formData = new FormData();
+      formData.append('file', docForm.file);
+
+      await billsApi.addDocument(bill.id, formData);
+      setDocForm({ file: null });
       setShowUpload(false);
       load();
     } catch (e) {
@@ -242,7 +237,6 @@ export default function BillDetailPage() {
                       <div className="doc-name">📄 {doc.filename}</div>
                       <div className="doc-meta">
                         {[
-                          doc.document_type,
                           doc.content_type,
                           doc.file_size != null ? `${(doc.file_size / 1024).toFixed(1)} KB` : null,
                           formatDateTime(doc.uploaded_at),
@@ -250,16 +244,21 @@ export default function BillDetailPage() {
                           .filter(Boolean)
                           .join(' · ')}
                       </div>
-                      {doc.notes && (
-                        <div className="doc-meta">{doc.notes}</div>
-                      )}
                     </div>
-                    <button
-                      className="btn-danger btn-sm"
-                      onClick={() => handleDeleteDocument(doc.id)}
-                    >
-                      Remove
-                    </button>
+                    <div className="flex gap-2">
+                      <a
+                        className="btn-secondary btn-sm"
+                        href={`/api/bills/${bill.id}/documents/${doc.id}/download`}
+                      >
+                        Download
+                      </a>
+                      <button
+                        className="btn-danger btn-sm"
+                        onClick={() => handleDeleteDocument(doc.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -312,42 +311,22 @@ export default function BillDetailPage() {
               <form onSubmit={handleDocumentUpload}>
                 <div className="form-grid">
                   <div className="form-group">
-                    <label>Filename *</label>
+                    <label>File *</label>
                     <input
-                      value={docForm.filename}
-                      onChange={(e) => setDocForm((f) => ({ ...f, filename: e.target.value }))}
-                      placeholder="e.g. BOL-12345.pdf"
+                      type="file"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0] ?? null;
+                        setDocForm((f) => ({ ...f, file }));
+                      }}
                       required
                     />
                   </div>
                   <div className="form-group">
-                    <label>Document Type</label>
-                    <select
-                      value={docForm.document_type}
-                      onChange={(e) => setDocForm((f) => ({ ...f, document_type: e.target.value }))}
-                    >
-                      <option value="">— Select Type —</option>
-                      <option value="BOL">Bill of Lading (BOL)</option>
-                      <option value="invoice">Invoice</option>
-                      <option value="proof_of_delivery">Proof of Delivery</option>
-                      <option value="customs">Customs Documents</option>
-                      <option value="insurance">Insurance</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                  <div className="form-group">
-                    <label>Content Type</label>
+                    <label>Selected filename</label>
                     <input
-                      value={docForm.content_type}
-                      onChange={(e) => setDocForm((f) => ({ ...f, content_type: e.target.value }))}
-                      placeholder="e.g. application/pdf"
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>Notes</label>
-                    <textarea
-                      value={docForm.notes}
-                      onChange={(e) => setDocForm((f) => ({ ...f, notes: e.target.value }))}
+                      value={docForm.file?.name ?? ''}
+                      readOnly
+                      placeholder="No file selected"
                     />
                   </div>
                 </div>

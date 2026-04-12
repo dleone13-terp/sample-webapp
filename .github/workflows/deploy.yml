@@ -1,0 +1,132 @@
+name: Deploy Worker
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.event.pull_request.number || github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  resolve-target:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      target_environment: ${{ steps.resolve.outputs.target_environment }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+    steps:
+      - name: Resolve target environment
+        id: resolve
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const isMainPush = context.eventName === 'push' && context.ref === 'refs/heads/main';
+            const isDispatchOnMain = context.eventName === 'workflow_dispatch' && context.ref === 'refs/heads/main';
+
+            const env = (isMainPush || isDispatchOnMain) ? 'production' : 'staging';
+            const pr = context.eventName === 'pull_request'
+              ? String(context.payload.pull_request.number)
+              : '';
+
+            core.setOutput('target_environment', env);
+            core.setOutput('pr_number', pr);
+
+  deploy:
+    needs: resolve-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: ${{ needs.resolve-target.outputs.target_environment }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      deployment_url: ${{ steps.deploy.outputs.deployment-url }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TARGET_ENV: ${{ needs.resolve-target.outputs.target_environment }}
+      PR_NUMBER: ${{ needs.resolve-target.outputs.pr_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend and backend bundle
+        run: npm run build
+
+      - name: Sync Access secrets to Worker
+        env:
+          ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
+          ACCESS_POLICY_AUD: ${{ vars.CF_ACCESS_POLICY_AUD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${ACCESS_TEAM_DOMAIN}" | npm exec --workspace=backend -- wrangler secret put TEAM_DOMAIN --env "${TARGET_ENV}" --config wrangler.toml
+          printf '%s' "${ACCESS_POLICY_AUD}" | npm exec --workspace=backend -- wrangler secret put POLICY_AUD --env "${TARGET_ENV}" --config wrangler.toml
+
+      - name: Apply D1 migrations
+        run: |
+          set -euo pipefail
+          if ! npm exec --workspace=backend -- wrangler d1 migrations apply DB --remote --env "${TARGET_ENV}" --config wrangler.toml; then
+            echo "Migrations failed for env ${TARGET_ENV}. Listing visible D1 databases for diagnostics." >&2
+            npm exec --workspace=backend -- wrangler d1 list || true
+            exit 1
+          fi
+
+      - name: Deploy Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend
+          command: deploy --env ${{ env.TARGET_ENV }} --config wrangler.toml
+
+      - name: Summary and PR comment
+        uses: actions/github-script@v8
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        with:
+          script: |
+            const url = process.env.DEPLOYMENT_URL || 'n/a';
+            const env = process.env.TARGET_ENV;
+            const pr = process.env.PR_NUMBER;
+
+            const lines = [
+              '### Worker deploy',
+              pr ? `- PR: #${pr}` : '',
+              `- Environment: ${env}`,
+              `- Deployment URL: ${url}`,
+              '- Migrations: applied before deploy',
+              '- Access config source: Wrangler Worker secrets (TEAM_DOMAIN, POLICY_AUD)',
+            ].filter(Boolean);
+
+            await core.summary.addRaw(lines.join('\n')).write();
+
+            if (env === 'staging' && pr) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: Number(pr),
+                body: [
+                  'Preview is ready.',
+                  `- URL: ${url}`,
+                  '- Environment: staging',
+                  '- Flow: same as production (migrate then deploy)',
+                ].join('\n'),
+              });
+            }

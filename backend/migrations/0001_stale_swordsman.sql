@@ -1,0 +1,1 @@
+ALTER TABLE `bill_documents` ADD `r2_object_key` text NOT NULL DEFAULT '';

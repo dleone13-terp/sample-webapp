@@ -7,6 +7,7 @@ import type { Bill, BillStatus } from '../types';
 import { STATUS_TRANSITIONS } from '../types';
 
 const bills = new Hono<{ Bindings: Env }>();
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 // Helper to generate bill numbers
 function generateBillNumber(): string {
@@ -18,6 +19,53 @@ function generateBillNumber(): string {
     .toString()
     .padStart(5, '0');
   return `${prefix}-${year}${month}-${random}`;
+}
+
+function sanitizeFilename(filename: string): string {
+  return filename
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120) || 'document.bin';
+}
+
+function createDocumentObjectKey(billId: number, filename: string): string {
+  const safeFilename = sanitizeFilename(filename);
+  return `bills/${billId}/${Date.now()}-${crypto.randomUUID()}-${safeFilename}`;
+}
+
+function getFilenameFromObjectKey(objectKey: string): string {
+  const parts = objectKey.split('/');
+  const tail = parts[parts.length - 1] ?? objectKey;
+  const strippedPrefix = tail.replace(/^\d+-[0-9a-fA-F-]+-/, '');
+  return strippedPrefix || tail;
+}
+
+async function hydrateDocument(
+  bucket: R2Bucket,
+  row: typeof schema.billDocuments.$inferSelect
+): Promise<{
+  id: number;
+  bill_id: number;
+  r2_object_key: string;
+  filename: string | null;
+  content_type: string | null;
+  file_size: number | null;
+  uploaded_at: string;
+}> {
+  const object = await bucket.head(row.r2_object_key);
+  return {
+    id: row.id,
+    bill_id: row.bill_id,
+    r2_object_key: row.r2_object_key,
+    filename:
+      object?.customMetadata?.originalFilename ??
+      object?.customMetadata?.filename ??
+      getFilenameFromObjectKey(row.r2_object_key),
+    content_type: object?.httpMetadata?.contentType ?? null,
+    file_size: object?.size ?? null,
+    uploaded_at: row.uploaded_at,
+  };
 }
 
 // GET /api/bills
@@ -84,11 +132,15 @@ bills.get('/:id', async (c) => {
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
   // Fetch documents and events
-  const documents = await db
+  const documentRows = await db
     .select()
     .from(schema.billDocuments)
     .where(eq(schema.billDocuments.bill_id, id))
     .orderBy(desc(schema.billDocuments.uploaded_at));
+
+  const documents = await Promise.all(
+    documentRows.map((row) => hydrateDocument(c.env.DOCUMENTS_BUCKET, row))
+  );
 
   const events = await db
     .select()
@@ -248,6 +300,18 @@ bills.delete('/:id', async (c) => {
 
   if (!existing) return c.json({ error: 'Bill not found' }, 404);
 
+  const documents = await db
+    .select({ r2_object_key: schema.billDocuments.r2_object_key })
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id));
+
+  await Promise.all(
+    documents.map(async (doc) => {
+      if (!doc.r2_object_key) return;
+      await c.env.DOCUMENTS_BUCKET.delete(doc.r2_object_key);
+    })
+  );
+
   await db.delete(schema.bills).where(eq(schema.bills.id, id));
   return c.json({ success: true });
 });
@@ -277,7 +341,9 @@ bills.get('/:id/documents', async (c) => {
     .where(eq(schema.billDocuments.bill_id, id))
     .orderBy(desc(schema.billDocuments.uploaded_at));
 
-  return c.json(results);
+  const hydrated = await Promise.all(results.map((row) => hydrateDocument(c.env.DOCUMENTS_BUCKET, row)));
+
+  return c.json(hydrated);
 });
 
 // POST /api/bills/:id/documents
@@ -289,38 +355,101 @@ bills.post('/:id/documents', async (c) => {
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
-  const body = await c.req.json<{
-    filename: string;
-    content_type?: string;
-    file_size?: number;
-    document_type?: string;
-    notes?: string;
-  }>();
+  const form = await c.req.formData();
+  const fileField = form.get('file');
+  if (!(fileField instanceof File)) {
+    return c.json({ error: 'file is required' }, 400);
+  }
 
-  if (!body.filename?.trim()) {
+  if (fileField.size <= 0) {
+    return c.json({ error: 'file must not be empty' }, 400);
+  }
+
+  if (fileField.size > MAX_UPLOAD_BYTES) {
+    return c.json({ error: `file exceeds ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB limit` }, 413);
+  }
+
+  const filename = (form.get('filename')?.toString().trim() || fileField.name || '').trim();
+  if (!filename) {
     return c.json({ error: 'filename is required' }, 400);
   }
 
-  const [result] = await db
-    .insert(schema.billDocuments)
-    .values({
-      bill_id: id,
-      filename: body.filename.trim(),
-      content_type: body.content_type ?? null,
-      file_size: body.file_size ?? null,
-      document_type: body.document_type ?? null,
-      notes: body.notes ?? null,
-    })
-    .returning();
+  const objectKey = createDocumentObjectKey(id, filename);
+  const fileBuffer = await fileField.arrayBuffer();
+
+  await c.env.DOCUMENTS_BUCKET.put(objectKey, fileBuffer, {
+    httpMetadata: {
+      contentType: fileField.type || 'application/octet-stream',
+    },
+    customMetadata: {
+      originalFilename: filename,
+    },
+  });
+
+  let result: typeof schema.billDocuments.$inferSelect | undefined;
+  try {
+    const inserted = await db
+      .insert(schema.billDocuments)
+      .values({
+        bill_id: id,
+        r2_object_key: objectKey,
+      })
+      .returning();
+    [result] = inserted;
+  } catch (err) {
+    await c.env.DOCUMENTS_BUCKET.delete(objectKey);
+    throw err;
+  }
+
+  if (!result) {
+    return c.json({ error: 'Failed to persist document metadata' }, 500);
+  }
 
   // Record event
   await db.insert(schema.billEvents).values({
     bill_id: id,
     event_type: 'document_added',
-    description: `Document uploaded: ${body.filename}`,
+    description: `Document uploaded: ${filename}`,
   });
 
-  return c.json(result, 201);
+  const hydrated = await hydrateDocument(c.env.DOCUMENTS_BUCKET, result);
+  return c.json(hydrated, 201);
+});
+
+// GET /api/bills/:id/documents/:docId/download
+bills.get('/:id/documents/:docId/download', async (c) => {
+  const db = getDb(c.env.DB);
+  const billId = Number(c.req.param('id'));
+  const docId = Number(c.req.param('docId'));
+
+  const [existing] = await db
+    .select({
+      r2_object_key: schema.billDocuments.r2_object_key,
+    })
+    .from(schema.billDocuments)
+    .where(and(eq(schema.billDocuments.id, docId), eq(schema.billDocuments.bill_id, billId)))
+    .limit(1);
+
+  if (!existing) return c.json({ error: 'Document not found' }, 404);
+  if (!existing.r2_object_key) {
+    return c.json({ error: 'Document is metadata-only and has no stored file' }, 409);
+  }
+
+  const object = await c.env.DOCUMENTS_BUCKET.get(existing.r2_object_key);
+  if (!object || !object.body) {
+    return c.json({ error: 'Stored file not found' }, 404);
+  }
+
+  const filename =
+    object.customMetadata?.originalFilename ??
+    object.customMetadata?.filename ??
+    getFilenameFromObjectKey(existing.r2_object_key);
+
+  const headers = new Headers();
+  headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+  headers.set('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
+
+  return new Response(object.body, { headers });
 });
 
 // DELETE /api/bills/:id/documents/:docId
@@ -330,19 +459,25 @@ bills.delete('/:id/documents/:docId', async (c) => {
   const docId = Number(c.req.param('docId'));
 
   const [existing] = await db
-    .select({ filename: schema.billDocuments.filename })
+    .select({ r2_object_key: schema.billDocuments.r2_object_key })
     .from(schema.billDocuments)
     .where(and(eq(schema.billDocuments.id, docId), eq(schema.billDocuments.bill_id, billId)))
     .limit(1);
 
   if (!existing) return c.json({ error: 'Document not found' }, 404);
 
+  if (existing.r2_object_key) {
+    await c.env.DOCUMENTS_BUCKET.delete(existing.r2_object_key);
+  }
+
+  const removedName = getFilenameFromObjectKey(existing.r2_object_key);
+
   await db.delete(schema.billDocuments).where(eq(schema.billDocuments.id, docId));
 
   await db.insert(schema.billEvents).values({
     bill_id: billId,
     event_type: 'document_removed',
-    description: `Document removed: ${existing.filename}`,
+    description: `Document removed: ${removedName}`,
   });
 
   return c.json({ success: true });
