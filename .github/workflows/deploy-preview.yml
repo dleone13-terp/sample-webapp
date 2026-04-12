@@ -3,74 +3,32 @@ name: Deploy Preview Worker
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
-  push:
-    branches-ignore:
-      - main
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number || github.ref_name }}
+  group: preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  resolve-pr:
-    runs-on: ubuntu-latest
-    outputs:
-      pr_number: ${{ steps.resolve.outputs.pr_number }}
-      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
-    steps:
-      - name: Resolve PR context
-        id: resolve
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const eventName = context.eventName;
-
-            if (eventName === 'pull_request') {
-              const prNumber = String(context.payload.pull_request.number);
-              core.setOutput('pr_number', prNumber);
-              core.setOutput('should_deploy', 'true');
-              return;
-            }
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const branch = context.ref.replace('refs/heads/', '');
-            const result = await github.rest.pulls.list({
-              owner,
-              repo,
-              state: 'open',
-              head: `${owner}:${branch}`,
-              per_page: 1,
-            });
-
-            if (result.data.length === 0) {
-              core.setOutput('pr_number', '');
-              core.setOutput('should_deploy', 'false');
-              return;
-            }
-
-            core.setOutput('pr_number', String(result.data[0].number));
-            core.setOutput('should_deploy', 'true');
-
   deploy-preview:
-    needs: resolve-pr
-    if: needs.resolve-pr.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PR_NUMBER: ${{ needs.resolve-pr.outputs.pr_number }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      STAGING_DB_NAME: freight-bills-staging
+      STAGING_WORKER_NAME: freight-bill-tracker-staging
     outputs:
       db_name: ${{ steps.db.outputs.db_name }}
       worker_name: ${{ steps.db.outputs.worker_name }}
+      deployment_url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,8 +39,6 @@ jobs:
           node-version: '22'
           api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          require-pr-number: 'true'
-          pr-number: ${{ needs.resolve-pr.outputs.pr_number }}
 
       - name: Validate preview Access secrets
         env:
@@ -114,12 +70,12 @@ jobs:
       - name: Build frontend and backend bundle
         run: npm run build
 
-      - name: Create or resolve PR-specific D1 database
+      - name: Create or resolve staging D1 database
         id: db
         run: |
           set -euo pipefail
-          DB_NAME="freight-bills-pr-${PR_NUMBER}"
-          WORKER_NAME="freight-bill-tracker-pr-${PR_NUMBER}"
+          DB_NAME="${STAGING_DB_NAME}"
+          WORKER_NAME="${STAGING_WORKER_NAME}"
 
           DB_ID=$(node .github/scripts/resolve-d1-database.js "$DB_NAME" --create)
 
@@ -132,7 +88,7 @@ jobs:
           echo "db_id=${DB_ID}" >> "$GITHUB_OUTPUT"
           echo "worker_name=${WORKER_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate preview Wrangler config for CI
+      - name: Generate staging Wrangler config for CI
         env:
           DB_NAME: ${{ steps.db.outputs.db_name }}
           DB_ID: ${{ steps.db.outputs.db_id }}
@@ -140,11 +96,13 @@ jobs:
           PREVIEW_TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PREVIEW }}
           PREVIEW_POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PREVIEW }}
         run: |
-          cat > backend/wrangler.preview.ci.toml <<EOF
+          cat > backend/wrangler.staging.ci.toml <<EOF
           name = "${WORKER_NAME}"
           main = "src/index.ts"
           compatibility_date = "2025-03-31"
           compatibility_flags = ["nodejs_compat"]
+          workers_dev = true
+          preview_urls = true
 
           [vars]
           TEAM_DOMAIN = "${PREVIEW_TEAM_DOMAIN}"
@@ -165,7 +123,7 @@ jobs:
           DB_NAME: ${{ steps.db.outputs.db_name }}
         run: |
           set -euo pipefail
-          if ! npm exec --workspace=backend -- wrangler d1 migrations apply "${DB_NAME}" --remote --config wrangler.preview.ci.toml; then
+          if ! npm exec --workspace=backend -- wrangler d1 migrations apply "${DB_NAME}" --remote --config wrangler.staging.ci.toml; then
             echo "Preview migrations failed for ${DB_NAME}. Listing visible D1 databases for diagnostics." >&2
             npm exec --workspace=backend -- wrangler d1 list || true
             exit 1
@@ -178,7 +136,27 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: backend
-          command: deploy --config wrangler.preview.ci.toml
+          command: deploy --config wrangler.staging.ci.toml
+
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v8
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        with:
+          script: |
+            const body = [
+              'Preview is ready.',
+              `- URL: ${process.env.DEPLOYMENT_URL || 'n/a'}`,
+              '- Environment: staging',
+              '- Flow: same as production (migrate then deploy)',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
 
       - name: Summary
         env:
@@ -189,20 +167,9 @@ jobs:
           {
             echo "### Preview deploy"
             echo "- PR: #${PR_NUMBER}"
+            echo "- Environment: staging"
             echo "- Worker: ${WORKER_NAME}"
             echo "- Database: ${DB_NAME}"
             echo "- Deployment URL: ${DEPLOYMENT_URL:-n/a}"
             echo "- Migrations: applied before deploy"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  skip-no-pr:
-    needs: resolve-pr
-    if: needs.resolve-pr.outputs.should_deploy != 'true' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: No open PR for branch
-        run: |
-          {
-            echo "### Preview deploy skipped"
-            echo "- Reason: push to non-main branch with no open PR"
           } >> "$GITHUB_STEP_SUMMARY"

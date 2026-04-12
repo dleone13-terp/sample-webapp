@@ -118,18 +118,18 @@ npm run deploy    # Build + deploy to Cloudflare Workers
 Deployments use the official Wrangler GitHub Action.
 
 - `.github/workflows/deploy-production.yml`: deploys on pushes to `main`
-- `.github/workflows/deploy-preview.yml`: deploys preview Workers on non-main branch pushes when an open PR exists, and on PR open/reopen/synchronize
-- `.github/workflows/deploy-preview-cleanup.yml`: deletes PR preview D1 database on PR close
+- `.github/workflows/deploy-preview.yml`: deploys a staging Worker for each PR using the same migration + deploy sequence as production, then comments the preview URL on the PR
 - `.github/actions/setup-cloudflare-node/action.yml`: shared setup action used by workflows for Node setup, dependency install, and Cloudflare credential validation
 
 Preview lifecycle:
 
-1. Create/reuse `freight-bills-pr-<PR_NUMBER>` D1 database
-2. Apply migrations to that PR database
-3. Deploy `freight-bill-tracker-pr-<PR_NUMBER>` Worker
-4. On PR close, delete `freight-bills-pr-<PR_NUMBER>`
+1. Build frontend and backend from the PR commit
+2. Create/reuse the shared staging D1 database (`freight-bills-staging`)
+3. Apply remote migrations to staging D1
+4. Deploy staging Worker (`freight-bill-tracker-staging`) to `workers.dev`
+5. Share the generated preview URL in the PR comment and workflow summary
 
-Both production and preview run migrations before deploy.
+Production and preview both run migrations before deploy.
 
 ### Required GitHub secrets
 
@@ -167,6 +167,7 @@ CI troubleshooting:
 - Verify `CLOUDFLARE_ACCOUNT_ID` matches the account where the Worker and D1 databases live.
 - A `SyntaxError` during JSON parsing after `wrangler d1 list --json` usually means Wrangler printed auth warnings/errors instead of JSON due to invalid credentials.
 - If preview deploy fails at "Validate preview Access secrets", verify `CF_ACCESS_TEAM_DOMAIN_PREVIEW` and `CF_ACCESS_POLICY_AUD_PREVIEW` exist, are plain strings (no quotes), and the team domain starts with `https://` without a trailing slash.
+- If preview deploy fails during "Apply D1 migrations (preview)", inspect migration ordering/compatibility and re-run after fixing migration scripts.
 
 ## Cloudflare Access Auth
 

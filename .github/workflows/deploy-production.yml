@@ -101,7 +101,13 @@ jobs:
           EOF
 
       - name: Apply D1 migrations (production)
-        run: npm exec --workspace=backend -- wrangler d1 migrations apply "${PROD_DB_NAME}" --remote --config wrangler.production.ci.toml
+        run: |
+          set -euo pipefail
+          if ! npm exec --workspace=backend -- wrangler d1 migrations apply "${PROD_DB_NAME}" --remote --config wrangler.production.ci.toml; then
+            echo "Production migrations failed for ${PROD_DB_NAME}. Listing visible D1 databases for diagnostics." >&2
+            npm exec --workspace=backend -- wrangler d1 list || true
+            exit 1
+          fi
 
       - name: Deploy production Worker
         id: deploy
