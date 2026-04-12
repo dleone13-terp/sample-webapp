@@ -159,6 +159,7 @@ Notes:
 - `CF_ACCESS_POLICY_AUD_*` should be the exact Access Application Audience (AUD) tag from Zero Trust.
 - Production and preview must use different Access AUD values.
 - Enter secret values as plain strings in GitHub (no surrounding quotes).
+- Deploy workflows write `TEAM_DOMAIN` and `POLICY_AUD` into generated CI Wrangler configs as Worker `[vars]`, so those keys should appear in Worker Variables after a successful deploy.
 
 CI troubleshooting:
 

@@ -137,6 +137,8 @@ jobs:
           DB_NAME: ${{ steps.db.outputs.db_name }}
           DB_ID: ${{ steps.db.outputs.db_id }}
           WORKER_NAME: ${{ steps.db.outputs.worker_name }}
+          PREVIEW_TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PREVIEW }}
+          PREVIEW_POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PREVIEW }}
         run: |
           cat > backend/wrangler.preview.ci.toml <<EOF
           name = "${WORKER_NAME}"
@@ -145,6 +147,8 @@ jobs:
           compatibility_flags = ["nodejs_compat"]
 
           [vars]
+          TEAM_DOMAIN = "${PREVIEW_TEAM_DOMAIN}"
+          POLICY_AUD = "${PREVIEW_POLICY_AUD}"
           JWT_VALIDATION_DISABLED = "false"
 
           [[d1_databases]]
@@ -175,12 +179,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: backend
           command: deploy --config wrangler.preview.ci.toml
-          secrets: |
-            POLICY_AUD
-            TEAM_DOMAIN
-        env:
-          POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PREVIEW }}
-          TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PREVIEW }}
 
       - name: Summary
         env:

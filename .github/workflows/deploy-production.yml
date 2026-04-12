@@ -45,10 +45,40 @@ jobs:
             exit 1
           fi
 
+      - name: Validate production Access secrets
+        env:
+          PROD_TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PROD }}
+          PROD_POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PROD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROD_TEAM_DOMAIN}" ]; then
+            echo "Missing required secret: CF_ACCESS_TEAM_DOMAIN_PROD" >&2
+            exit 1
+          fi
+          if [ -z "${PROD_POLICY_AUD}" ]; then
+            echo "Missing required secret: CF_ACCESS_POLICY_AUD_PROD" >&2
+            exit 1
+          fi
+          if [[ "${PROD_TEAM_DOMAIN}" != https://* ]]; then
+            echo "CF_ACCESS_TEAM_DOMAIN_PROD must start with https://" >&2
+            exit 1
+          fi
+          if [[ "${PROD_TEAM_DOMAIN}" == */ ]]; then
+            echo "CF_ACCESS_TEAM_DOMAIN_PROD must not have a trailing slash" >&2
+            exit 1
+          fi
+          if [[ "${PROD_POLICY_AUD}" == "replace-with-access-app-aud" ]]; then
+            echo "CF_ACCESS_POLICY_AUD_PROD is still set to a placeholder value" >&2
+            exit 1
+          fi
+
       - name: Build frontend and backend bundle
         run: npm run build
 
       - name: Generate production Wrangler config for CI
+        env:
+          PROD_TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PROD }}
+          PROD_POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PROD }}
         run: |
           cat > backend/wrangler.production.ci.toml <<EOF
           name = "freight-bill-tracker"
@@ -57,6 +87,8 @@ jobs:
           compatibility_flags = ["nodejs_compat"]
 
           [vars]
+          TEAM_DOMAIN = "${PROD_TEAM_DOMAIN}"
+          POLICY_AUD = "${PROD_POLICY_AUD}"
           JWT_VALIDATION_DISABLED = "false"
 
           [[d1_databases]]
@@ -79,12 +111,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: backend
           command: deploy --config wrangler.production.ci.toml
-          secrets: |
-            POLICY_AUD
-            TEAM_DOMAIN
-        env:
-          POLICY_AUD: ${{ secrets.CF_ACCESS_POLICY_AUD_PROD }}
-          TEAM_DOMAIN: ${{ secrets.CF_ACCESS_TEAM_DOMAIN_PROD }}
 
       - name: Summary
         env:
