@@ -118,7 +118,7 @@ npm run deploy    # Build + deploy to Cloudflare Workers
 Deployments use the official Wrangler GitHub Action.
 
 - `.github/workflows/deploy-production.yml`: deploys on pushes to `main`
-- `.github/workflows/deploy-preview.yml`: deploys a staging Worker for each PR using the same migration + deploy sequence as production, then comments the preview URL on the PR
+- `.github/workflows/deploy-preview.yml`: deploys a staging Worker using the same migration + deploy sequence as production, triggered by PR updates, non-main pushes when an open PR exists, or manual workflow dispatch; comments preview URL on the PR when available
 - `.github/actions/setup-cloudflare-node/action.yml`: shared setup action used by workflows for Node setup, dependency install, and Cloudflare credential validation
 
 Preview lifecycle:

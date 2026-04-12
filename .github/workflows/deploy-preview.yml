@@ -3,6 +3,10 @@ name: Deploy Preview Worker
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,17 +16,65 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-${{ github.event.pull_request.number || github.ref_name || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  resolve-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
+    steps:
+      - name: Resolve PR context
+        id: resolve
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const eventName = context.eventName;
+
+            if (eventName === 'pull_request') {
+              const prNumber = String(context.payload.pull_request.number);
+              core.setOutput('pr_number', prNumber);
+              core.setOutput('should_deploy', 'true');
+              return;
+            }
+
+            if (eventName === 'workflow_dispatch') {
+              core.setOutput('pr_number', '');
+              core.setOutput('should_deploy', 'true');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = context.ref.replace('refs/heads/', '');
+            const result = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              head: `${owner}:${branch}`,
+              per_page: 1,
+            });
+
+            if (result.data.length === 0) {
+              core.setOutput('pr_number', '');
+              core.setOutput('should_deploy', 'false');
+              return;
+            }
+
+            core.setOutput('pr_number', String(result.data[0].number));
+            core.setOutput('should_deploy', 'true');
+
   deploy-preview:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NUMBER: ${{ needs.resolve-pr.outputs.pr_number }}
       STAGING_DB_NAME: freight-bills-staging
       STAGING_WORKER_NAME: freight-bill-tracker-staging
     outputs:
@@ -139,8 +191,10 @@ jobs:
           command: deploy --config wrangler.staging.ci.toml
 
       - name: Comment PR with preview URL
+        if: env.PR_NUMBER != ''
         uses: actions/github-script@v8
         env:
+          PR_NUMBER: ${{ env.PR_NUMBER }}
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
         with:
           script: |
@@ -154,7 +208,7 @@ jobs:
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              issue_number: Number(process.env.PR_NUMBER),
               body,
             });
 
@@ -172,4 +226,16 @@ jobs:
             echo "- Database: ${DB_NAME}"
             echo "- Deployment URL: ${DEPLOYMENT_URL:-n/a}"
             echo "- Migrations: applied before deploy"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  skip-no-pr:
+    needs: resolve-pr
+    if: needs.resolve-pr.outputs.should_deploy != 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No open PR for branch
+        run: |
+          {
+            echo "### Preview deploy skipped"
+            echo "- Reason: push to non-main branch with no open PR"
           } >> "$GITHUB_STEP_SUMMARY"
