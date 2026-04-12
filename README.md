@@ -2,7 +2,7 @@
 
 A full-stack freight bill tracking web application built with:
 
-- **Backend**: [Hono](https://hono.dev/) on Cloudflare Workers
+- **Backend**: [Hono](https://hono.dev/) + [Drizzle ORM](https://orm.drizzle.team/) on Cloudflare Workers
 - **Frontend**: [Vite](https://vite.dev/) + React
 - **Database**: [Cloudflare D1](https://developers.cloudflare.com/d1/) (SQLite-compatible), with schema and migrations managed by [Drizzle ORM](https://orm.drizzle.team/)
 - **File storage**: [Cloudflare R2](https://developers.cloudflare.com/r2/) for uploaded bill documents

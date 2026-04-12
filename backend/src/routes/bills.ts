@@ -9,7 +9,6 @@ import { STATUS_TRANSITIONS } from '../types';
 const bills = new Hono<{ Bindings: Env }>();
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-// Helper to generate bill numbers
 function generateBillNumber(): string {
   const date = new Date();
   const prefix = 'FRT';
@@ -79,9 +78,11 @@ bills.get('/', async (c) => {
   if (status) {
     filters.push(eq(schema.bills.status, status as BillStatus));
   }
+
   if (customerId) {
     filters.push(eq(schema.bills.customer_id, Number(customerId)));
   }
+
   if (search) {
     const pattern = `%${search}%`;
     filters.push(
@@ -110,7 +111,6 @@ bills.get('/', async (c) => {
   return c.json(results);
 });
 
-// GET /api/bills/:id
 bills.get('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -151,7 +151,6 @@ bills.get('/:id', async (c) => {
   return c.json({ ...bill, documents, events });
 });
 
-// POST /api/bills
 bills.post('/', async (c) => {
   const db = getDb(c.env.DB);
   const body = await c.req.json<Partial<Bill>>();
@@ -200,7 +199,6 @@ bills.post('/', async (c) => {
   return c.json(result, 201);
 });
 
-// PUT /api/bills/:id
 bills.put('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -243,7 +241,6 @@ bills.put('/:id', async (c) => {
   return c.json(result);
 });
 
-// PUT /api/bills/:id/status
 bills.put('/:id/status', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -291,7 +288,6 @@ bills.put('/:id/status', async (c) => {
   return c.json(result);
 });
 
-// DELETE /api/bills/:id
 bills.delete('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -316,7 +312,6 @@ bills.delete('/:id', async (c) => {
   return c.json({ success: true });
 });
 
-// GET /api/bills/:id/events
 bills.get('/:id/events', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -330,7 +325,6 @@ bills.get('/:id/events', async (c) => {
   return c.json(results);
 });
 
-// GET /api/bills/:id/documents
 bills.get('/:id/documents', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -346,7 +340,6 @@ bills.get('/:id/documents', async (c) => {
   return c.json(hydrated);
 });
 
-// POST /api/bills/:id/documents
 bills.post('/:id/documents', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
@@ -452,7 +445,6 @@ bills.get('/:id/documents/:docId/download', async (c) => {
   return new Response(object.body, { headers });
 });
 
-// DELETE /api/bills/:id/documents/:docId
 bills.delete('/:id/documents/:docId', async (c) => {
   const db = getDb(c.env.DB);
   const billId = Number(c.req.param('id'));

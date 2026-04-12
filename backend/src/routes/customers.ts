@@ -20,7 +20,7 @@ customers.get('/:id', async (c) => {
   const [customer] = await db.select().from(schema.customers).where(eq(schema.customers.id, id)).limit(1);
 
   if (!customer) return c.json({ error: 'Customer not found' }, 404);
-  return c.json(customer);
+  return c.json(customer as Customer);
 });
 
 // POST /api/customers
@@ -80,7 +80,7 @@ customers.put('/:id', async (c) => {
     .returning();
 
   if (!result) return c.json({ error: 'Customer not found' }, 404);
-  return c.json(result);
+  return c.json(result as Customer);
 });
 
 // DELETE /api/customers/:id
