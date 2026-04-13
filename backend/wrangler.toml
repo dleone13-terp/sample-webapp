@@ -10,9 +10,10 @@ database_id = "freight-bills-db-local"
 
 [[r2_buckets]]
 binding = "DOCUMENTS_BUCKET"
-bucket_name = "freight-bill-documents"
+bucket_name = "freight-bill-documents-local"
 
 [vars]
+TEAM_DOMAIN = "https://dayserver.cloudflareaccess.com"
 JWT_VALIDATION_DISABLED = "true"
 
 [env.production]
@@ -20,7 +21,11 @@ JWT_VALIDATION_DISABLED = "true"
 name = "freight-bill-tracker"
 
 [env.production.vars]
+TEAM_DOMAIN = "https://dayserver.cloudflareaccess.com"
 JWT_VALIDATION_DISABLED = "false"
+
+[env.production.secrets]
+required = ["POLICY_AUD"]
 
 [[env.production.d1_databases]]
 binding = "DB"
@@ -38,7 +43,11 @@ workers_dev = true
 preview_urls = true
 
 [env.staging.vars]
+TEAM_DOMAIN = "https://dayserver.cloudflareaccess.com"
 JWT_VALIDATION_DISABLED = "false"
+
+[env.staging.secrets]
+required = ["POLICY_AUD"]
 
 [[env.staging.d1_databases]]
 binding = "DB"

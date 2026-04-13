@@ -69,20 +69,6 @@ jobs:
       - name: Build frontend and backend bundle
         run: npm run build
 
-      - name: Sync Access secrets to Worker
-        env:
-          ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
-          ACCESS_POLICY_AUD: ${{ vars.CF_ACCESS_POLICY_AUD }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ACCESS_TEAM_DOMAIN}" ] || [ -z "${ACCESS_POLICY_AUD}" ]; then
-            echo "Missing Access values. Ensure CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_POLICY_AUD are set in GitHub Actions vars." >&2
-            exit 1
-          fi
-
-          node -e 'process.stdout.write(JSON.stringify({ TEAM_DOMAIN: process.env.ACCESS_TEAM_DOMAIN, POLICY_AUD: process.env.ACCESS_POLICY_AUD }))' \
-            | npm exec --workspace=backend -- wrangler secret bulk --env "${TARGET_ENV}" --config wrangler.toml
-
       - name: Apply D1 migrations
         run: |
           set -euo pipefail
@@ -117,7 +103,7 @@ jobs:
               `- Environment: ${env}`,
               `- Deployment URL: ${url}`,
               '- Migrations: applied before deploy',
-              '- Access config source: Wrangler Worker secrets (TEAM_DOMAIN, POLICY_AUD)',
+              '- Access config source: TEAM_DOMAIN via Wrangler vars, POLICY_AUD via Worker secret',
             ].filter(Boolean);
 
             await core.summary.addRaw(lines.join('\n')).write();

@@ -65,7 +65,7 @@ npm install
    One-off equivalent:
 
    ```bash
-   npm exec --workspace=backend -- wrangler d1 create freight-bills-db --config wrangler.toml
+   npm exec --workspace=backend -- wrangler d1 create freight-bills-db
    ```
 
 2. Copy the `database_id` from the output into `backend/wrangler.toml`
@@ -73,7 +73,7 @@ npm install
 3. Create the R2 bucket (one-time):
 
    ```bash
-   npm exec --workspace=backend -- wrangler r2 bucket create freight-bill-documents --config wrangler.toml
+   npm exec --workspace=backend -- wrangler r2 bucket create freight-bill-documents
    ```
 
    For CI environments with separate storage isolation, create both buckets once:
@@ -135,8 +135,6 @@ npm run deploy    # Build + deploy to Cloudflare Workers
 Deployments use the official Wrangler GitHub Action.
 
 - `.github/workflows/deploy.yml`: single workflow that routes to environments automatically (`main` -> `production`, `pull_request` -> `staging`, non-main `push` deploys `staging` only with an open PR, and `workflow_dispatch` uses `production` when run from `main` otherwise `staging`)
-- `.github/docs/deployment-config.md`: source map of where each deployment value comes from (Wrangler config vs GitHub secrets vs Worker secrets)
-- `.github/docs/github-cloudflare-environment-setup.md`: exact GitHub + Cloudflare setup for environments and API token permissions
 
 Cloudflare source-of-truth model used in this repo:
 
@@ -150,7 +148,7 @@ Deployment lifecycle (staging and production both use the same steps):
 2. Build frontend and backend from the commit
 3. Use env-specific D1 binding from `backend/wrangler.toml`
 4. Apply remote migrations to env-specific D1
-5. Sync Access secrets (`TEAM_DOMAIN`, `POLICY_AUD`) onto the env-specific Worker
+5. Validate required Access secret (`POLICY_AUD`) in the target environment at deploy time
 6. Deploy Worker with `wrangler deploy --env <staging|production>`
 7. Write deployment summary (and post PR preview comment for staging when PR context exists)
 
@@ -170,32 +168,49 @@ Configure deploy settings in both environments (`staging` and `production`):
   - `CLOUDFLARE_API_TOKEN`
 - GitHub **Environment variables**:
   - `CLOUDFLARE_ACCOUNT_ID`
-  - `CF_ACCESS_TEAM_DOMAIN`
-  - `CF_ACCESS_POLICY_AUD`
 
 Recommended least-privilege model:
 
 - Use separate `CLOUDFLARE_API_TOKEN` values for staging and production.
 - Scope each token only to the target Cloudflare account and only required permission groups.
+- Required Cloudflare account permissions for this workflow: `Workers Scripts Edit`, `D1 Edit`.
+- Optional only if needed by account policy for R2 binding checks: `Workers R2 Storage Edit`.
 
 Example values:
 
 ```dotenv
 CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
 CLOUDFLARE_ACCOUNT_ID=1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p
-CF_ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
-CF_ACCESS_POLICY_AUD=4714c1358e65fe4b408ad6d432a5f878f08194bdb4752441fd56faefa9b2b6f2
 ```
 
 Notes:
 
-- `CF_ACCESS_TEAM_DOMAIN` should include `https://` and should not have a trailing slash.
-- `CF_ACCESS_POLICY_AUD` should be the exact Access Application Audience (AUD) tag from Zero Trust.
-- Staging and production environments should use different Access AUD values.
 - Staging and production environments should use different Cloudflare API tokens.
 - Enter secret and variable values as plain strings in GitHub (no surrounding quotes).
 - D1 IDs are sourced directly from `backend/wrangler.toml` for staging and production.
-- Deploy workflow reads `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_POLICY_AUD` from GitHub environment variables, then syncs them to Worker secrets (`TEAM_DOMAIN`, `POLICY_AUD`) using Wrangler (`wrangler secret put ... --env <env>`) before deploying with `backend/wrangler.toml`.
+- `TEAM_DOMAIN` is committed in `backend/wrangler.toml` under `vars` for each environment.
+- `POLICY_AUD` is required at deploy time via Wrangler `secrets.required` and must be set manually once per environment in Cloudflare.
+- `wrangler secret put` creates a new Worker version and deploys immediately.
+- Set `POLICY_AUD` manually per environment using Wrangler:
+
+```bash
+echo "<STAGING_POLICY_AUD>" | npm exec --workspace=backend -- wrangler secret put POLICY_AUD --env staging
+echo "<PRODUCTION_POLICY_AUD>" | npm exec --workspace=backend -- wrangler secret put POLICY_AUD --env production
+```
+
+Recommended GitHub environment protection rules:
+
+- `staging`: allow branch + PR-triggered deploys for your workflow, reviewers optional.
+- `production`: restrict to `main`, enable required reviewers, enable prevent self-review.
+
+Optional Cloudflare token verification:
+
+```bash
+curl "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+   --header "Authorization: Bearer <API_TOKEN>"
+```
+
+Token rotation (per environment): create new token, update GitHub environment secret, run one deploy, revoke old token.
 
 CI troubleshooting:
 
@@ -213,11 +228,11 @@ Current mode in this repo: **web OIDC login only**.
 
 Set these using Worker secrets and env vars:
 
-- `TEAM_DOMAIN` (Worker secret): your Cloudflare Zero Trust team domain, for example `https://your-team.cloudflareaccess.com`
+- `TEAM_DOMAIN` (Wrangler `vars`): your Cloudflare Zero Trust team domain, for example `https://your-team.cloudflareaccess.com`
 - `POLICY_AUD` (Worker secret): Access application AUD tag for the protected app
 - `JWT_VALIDATION_DISABLED` (Wrangler `vars`): set to `false` in deployed environments; optionally `true` for local-only development
 
-In CI, the workflow reads `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_POLICY_AUD` from GitHub environment variables and syncs `TEAM_DOMAIN` and `POLICY_AUD` onto each Worker environment before deploy.
+In deploys, Wrangler validates `POLICY_AUD` exists in the target environment (via `secrets.required`) before completing deployment.
 
 For local development without Access edge enforcement, create `backend/.dev.vars`:
 
