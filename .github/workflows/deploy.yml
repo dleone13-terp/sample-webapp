@@ -75,8 +75,13 @@ jobs:
           ACCESS_POLICY_AUD: ${{ vars.CF_ACCESS_POLICY_AUD }}
         run: |
           set -euo pipefail
-          printf '%s' "${ACCESS_TEAM_DOMAIN}" | npm exec --workspace=backend -- wrangler secret put TEAM_DOMAIN --env "${TARGET_ENV}" --config wrangler.toml --overwrite
-          printf '%s' "${ACCESS_POLICY_AUD}" | npm exec --workspace=backend -- wrangler secret put POLICY_AUD --env "${TARGET_ENV}" --config wrangler.toml --overwrite
+          if [ -z "${ACCESS_TEAM_DOMAIN}" ] || [ -z "${ACCESS_POLICY_AUD}" ]; then
+            echo "Missing Access values. Ensure CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_POLICY_AUD are set in GitHub Actions vars." >&2
+            exit 1
+          fi
+
+          node -e 'process.stdout.write(JSON.stringify({ TEAM_DOMAIN: process.env.ACCESS_TEAM_DOMAIN, POLICY_AUD: process.env.ACCESS_POLICY_AUD }))' \
+            | npm exec --workspace=backend -- wrangler secret bulk --env "${TARGET_ENV}" --config wrangler.toml
 
       - name: Apply D1 migrations
         run: |
