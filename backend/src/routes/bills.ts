@@ -1,18 +1,13 @@
 import { Hono } from 'hono';
 import { and, asc, desc, eq, getTableColumns, like, or, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
-import { getDb } from '../db';
-import {
-  bills as billsTable,
-  billDocuments,
-  billEvents,
-  customers as customersTable,
-} from '../db/schema';
+import { getDb, schema } from '../db';
 import type { Env } from '../types';
 import type { Bill, BillStatus } from '../types';
 import { STATUS_TRANSITIONS } from '../types';
 
 const bills = new Hono<{ Bindings: Env }>();
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 function generateBillNumber(): string {
   const date = new Date();
@@ -25,43 +20,93 @@ function generateBillNumber(): string {
   return `${prefix}-${year}${month}-${random}`;
 }
 
+function sanitizeFilename(filename: string): string {
+  return filename
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 120) || 'document.bin';
+}
+
+function createDocumentObjectKey(billId: number, filename: string): string {
+  const safeFilename = sanitizeFilename(filename);
+  return `bills/${billId}/${Date.now()}-${crypto.randomUUID()}-${safeFilename}`;
+}
+
+function getFilenameFromObjectKey(objectKey: string): string {
+  const parts = objectKey.split('/');
+  const tail = parts[parts.length - 1] ?? objectKey;
+  const strippedPrefix = tail.replace(/^\d+-[0-9a-fA-F-]+-/, '');
+  return strippedPrefix || tail;
+}
+
+async function hydrateDocument(
+  bucket: R2Bucket,
+  row: typeof schema.billDocuments.$inferSelect
+): Promise<{
+  id: number;
+  bill_id: number;
+  r2_object_key: string;
+  filename: string | null;
+  content_type: string | null;
+  file_size: number | null;
+  uploaded_at: string;
+}> {
+  const object = await bucket.head(row.r2_object_key);
+  return {
+    id: row.id,
+    bill_id: row.bill_id,
+    r2_object_key: row.r2_object_key,
+    filename:
+      object?.customMetadata?.originalFilename ??
+      object?.customMetadata?.filename ??
+      getFilenameFromObjectKey(row.r2_object_key),
+    content_type: object?.httpMetadata?.contentType ?? null,
+    file_size: object?.size ?? null,
+    uploaded_at: row.uploaded_at,
+  };
+}
+
+// GET /api/bills
 bills.get('/', async (c) => {
   const db = getDb(c.env.DB);
   const status = c.req.query('status');
   const customerId = c.req.query('customer_id');
   const search = c.req.query('search');
 
-  const conditions: SQL[] = [];
-
+  const filters: SQL[] = [];
   if (status) {
-    conditions.push(eq(billsTable.status, status as BillStatus));
+    filters.push(eq(schema.bills.status, status as BillStatus));
   }
 
   if (customerId) {
-    conditions.push(eq(billsTable.customer_id, Number(customerId)));
+    filters.push(eq(schema.bills.customer_id, Number(customerId)));
   }
 
   if (search) {
     const pattern = `%${search}%`;
-    conditions.push(
+    filters.push(
       or(
-        like(billsTable.bill_number, pattern),
-        like(billsTable.tracking_number, pattern),
-        like(billsTable.carrier, pattern)
-      )!
+        like(schema.bills.bill_number, pattern),
+        like(schema.bills.tracking_number, pattern),
+        like(schema.bills.carrier, pattern)
+      ) as SQL
     );
   }
 
+  const whereClause = filters.length > 0 ? and(...filters) : undefined;
+  const billColumns = getTableColumns(schema.bills);
+
   const results = await db
     .select({
-      ...getTableColumns(billsTable),
-      customer_name: customersTable.name,
-      customer_company: customersTable.company,
+      ...billColumns,
+      customer_name: schema.customers.name,
+      customer_company: schema.customers.company,
     })
-    .from(billsTable)
-    .leftJoin(customersTable, eq(billsTable.customer_id, customersTable.id))
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
-    .orderBy(desc(billsTable.created_at));
+    .from(schema.bills)
+    .leftJoin(schema.customers, eq(schema.bills.customer_id, schema.customers.id))
+    .where(whereClause)
+    .orderBy(desc(schema.bills.created_at));
 
   return c.json(results);
 });
@@ -70,32 +115,38 @@ bills.get('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
+  const billColumns = getTableColumns(schema.bills);
   const [bill] = await db
     .select({
-      ...getTableColumns(billsTable),
-      customer_name: customersTable.name,
-      customer_company: customersTable.company,
-      customer_email: customersTable.email,
-      customer_phone: customersTable.phone,
+      ...billColumns,
+      customer_name: schema.customers.name,
+      customer_company: schema.customers.company,
+      customer_email: schema.customers.email,
+      customer_phone: schema.customers.phone,
     })
-    .from(billsTable)
-    .leftJoin(customersTable, eq(billsTable.customer_id, customersTable.id))
-    .where(eq(billsTable.id, id))
+    .from(schema.bills)
+    .leftJoin(schema.customers, eq(schema.bills.customer_id, schema.customers.id))
+    .where(eq(schema.bills.id, id))
     .limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
-  const documents = await db
+  // Fetch documents and events
+  const documentRows = await db
     .select()
-    .from(billDocuments)
-    .where(eq(billDocuments.bill_id, id))
-    .orderBy(desc(billDocuments.uploaded_at));
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id))
+    .orderBy(desc(schema.billDocuments.uploaded_at));
+
+  const documents = await Promise.all(
+    documentRows.map((row) => hydrateDocument(c.env.DOCUMENTS_BUCKET, row))
+  );
 
   const events = await db
     .select()
-    .from(billEvents)
-    .where(eq(billEvents.bill_id, id))
-    .orderBy(asc(billEvents.created_at));
+    .from(schema.billEvents)
+    .where(eq(schema.billEvents.bill_id, id))
+    .orderBy(asc(schema.billEvents.created_at));
 
   return c.json({ ...bill, documents, events });
 });
@@ -107,7 +158,7 @@ bills.post('/', async (c) => {
   const billNumber = body.bill_number?.trim() || generateBillNumber();
 
   const [result] = await db
-    .insert(billsTable)
+    .insert(schema.bills)
     .values({
       bill_number: billNumber,
       customer_id: body.customer_id ?? null,
@@ -135,13 +186,13 @@ bills.post('/', async (c) => {
     })
     .returning();
 
+  // Record creation event
   if (result) {
-    await db.insert(billEvents).values({
+    await db.insert(schema.billEvents).values({
       bill_id: result.id,
       event_type: 'created',
       to_status: 'draft',
       description: 'Bill created',
-      created_by: 'system',
     });
   }
 
@@ -153,12 +204,12 @@ bills.put('/:id', async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json<Partial<Bill>>();
 
-  const [existing] = await db.select().from(billsTable).where(eq(billsTable.id, id)).limit(1);
+  const [existing] = await db.select().from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!existing) return c.json({ error: 'Bill not found' }, 404);
 
   const [result] = await db
-    .update(billsTable)
+    .update(schema.bills)
     .set({
       customer_id: body.customer_id ?? existing.customer_id,
       carrier: body.carrier ?? existing.carrier,
@@ -184,7 +235,7 @@ bills.put('/:id', async (c) => {
       actual_delivery: body.actual_delivery ?? existing.actual_delivery,
       updated_at: sql`datetime('now')`,
     })
-    .where(eq(billsTable.id, id))
+    .where(eq(schema.bills.id, id))
     .returning();
 
   return c.json(result);
@@ -199,7 +250,7 @@ bills.put('/:id/status', async (c) => {
     created_by?: string;
   }>();
 
-  const [bill] = await db.select().from(billsTable).where(eq(billsTable.id, id)).limit(1);
+  const [bill] = await db.select().from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
@@ -214,25 +265,18 @@ bills.put('/:id/status', async (c) => {
     );
   }
 
-  const updateValues: {
-    status: BillStatus;
-    updated_at: ReturnType<typeof sql>;
-    actual_delivery?: ReturnType<typeof sql>;
-  } = {
-    status,
-    updated_at: sql`datetime('now')`,
-  };
-  if (status === 'delivered') {
-    updateValues.actual_delivery = sql`datetime('now')`;
-  }
-
   const [result] = await db
-    .update(billsTable)
-    .set(updateValues)
-    .where(eq(billsTable.id, id))
+    .update(schema.bills)
+    .set({
+      status,
+      actual_delivery: status === 'delivered' ? sql`datetime('now')` : bill.actual_delivery,
+      updated_at: sql`datetime('now')`,
+    })
+    .where(eq(schema.bills.id, id))
     .returning();
 
-  await db.insert(billEvents).values({
+  // Record event
+  await db.insert(schema.billEvents).values({
     bill_id: id,
     event_type: 'status_change',
     from_status: bill.status,
@@ -248,11 +292,23 @@ bills.delete('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const [existing] = await db.select({ id: billsTable.id }).from(billsTable).where(eq(billsTable.id, id)).limit(1);
+  const [existing] = await db.select({ id: schema.bills.id }).from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!existing) return c.json({ error: 'Bill not found' }, 404);
 
-  await db.delete(billsTable).where(eq(billsTable.id, id));
+  const documents = await db
+    .select({ r2_object_key: schema.billDocuments.r2_object_key })
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id));
+
+  await Promise.all(
+    documents.map(async (doc) => {
+      if (!doc.r2_object_key) return;
+      await c.env.DOCUMENTS_BUCKET.delete(doc.r2_object_key);
+    })
+  );
+
+  await db.delete(schema.bills).where(eq(schema.bills.id, id));
   return c.json({ success: true });
 });
 
@@ -262,9 +318,9 @@ bills.get('/:id/events', async (c) => {
 
   const results = await db
     .select()
-    .from(billEvents)
-    .where(eq(billEvents.bill_id, id))
-    .orderBy(asc(billEvents.created_at));
+    .from(schema.billEvents)
+    .where(eq(schema.billEvents.bill_id, id))
+    .orderBy(asc(schema.billEvents.created_at));
 
   return c.json(results);
 });
@@ -275,53 +331,118 @@ bills.get('/:id/documents', async (c) => {
 
   const results = await db
     .select()
-    .from(billDocuments)
-    .where(eq(billDocuments.bill_id, id))
-    .orderBy(desc(billDocuments.uploaded_at));
+    .from(schema.billDocuments)
+    .where(eq(schema.billDocuments.bill_id, id))
+    .orderBy(desc(schema.billDocuments.uploaded_at));
 
-  return c.json(results);
+  const hydrated = await Promise.all(results.map((row) => hydrateDocument(c.env.DOCUMENTS_BUCKET, row)));
+
+  return c.json(hydrated);
 });
 
 bills.post('/:id/documents', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const [bill] = await db.select({ id: billsTable.id }).from(billsTable).where(eq(billsTable.id, id)).limit(1);
+  const [bill] = await db.select({ id: schema.bills.id }).from(schema.bills).where(eq(schema.bills.id, id)).limit(1);
 
   if (!bill) return c.json({ error: 'Bill not found' }, 404);
 
-  const body = await c.req.json<{
-    filename: string;
-    content_type?: string;
-    file_size?: number;
-    document_type?: string;
-    notes?: string;
-  }>();
+  const form = await c.req.formData();
+  const fileField = form.get('file');
+  if (!(fileField instanceof File)) {
+    return c.json({ error: 'file is required' }, 400);
+  }
 
-  if (!body.filename?.trim()) {
+  if (fileField.size <= 0) {
+    return c.json({ error: 'file must not be empty' }, 400);
+  }
+
+  if (fileField.size > MAX_UPLOAD_BYTES) {
+    return c.json({ error: `file exceeds ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB limit` }, 413);
+  }
+
+  const filename = (form.get('filename')?.toString().trim() || fileField.name || '').trim();
+  if (!filename) {
     return c.json({ error: 'filename is required' }, 400);
   }
 
-  const [result] = await db
-    .insert(billDocuments)
-    .values({
-      bill_id: id,
-      filename: body.filename.trim(),
-      content_type: body.content_type ?? null,
-      file_size: body.file_size ?? null,
-      document_type: body.document_type ?? null,
-      notes: body.notes ?? null,
-    })
-    .returning();
+  const objectKey = createDocumentObjectKey(id, filename);
+  const fileBuffer = await fileField.arrayBuffer();
 
-  await db.insert(billEvents).values({
-    bill_id: id,
-    event_type: 'document_added',
-    description: `Document uploaded: ${body.filename}`,
-    created_by: 'system',
+  await c.env.DOCUMENTS_BUCKET.put(objectKey, fileBuffer, {
+    httpMetadata: {
+      contentType: fileField.type || 'application/octet-stream',
+    },
+    customMetadata: {
+      originalFilename: filename,
+    },
   });
 
-  return c.json(result, 201);
+  let result: typeof schema.billDocuments.$inferSelect | undefined;
+  try {
+    const inserted = await db
+      .insert(schema.billDocuments)
+      .values({
+        bill_id: id,
+        r2_object_key: objectKey,
+      })
+      .returning();
+    [result] = inserted;
+  } catch (err) {
+    await c.env.DOCUMENTS_BUCKET.delete(objectKey);
+    throw err;
+  }
+
+  if (!result) {
+    return c.json({ error: 'Failed to persist document metadata' }, 500);
+  }
+
+  // Record event
+  await db.insert(schema.billEvents).values({
+    bill_id: id,
+    event_type: 'document_added',
+    description: `Document uploaded: ${filename}`,
+  });
+
+  const hydrated = await hydrateDocument(c.env.DOCUMENTS_BUCKET, result);
+  return c.json(hydrated, 201);
+});
+
+// GET /api/bills/:id/documents/:docId/download
+bills.get('/:id/documents/:docId/download', async (c) => {
+  const db = getDb(c.env.DB);
+  const billId = Number(c.req.param('id'));
+  const docId = Number(c.req.param('docId'));
+
+  const [existing] = await db
+    .select({
+      r2_object_key: schema.billDocuments.r2_object_key,
+    })
+    .from(schema.billDocuments)
+    .where(and(eq(schema.billDocuments.id, docId), eq(schema.billDocuments.bill_id, billId)))
+    .limit(1);
+
+  if (!existing) return c.json({ error: 'Document not found' }, 404);
+  if (!existing.r2_object_key) {
+    return c.json({ error: 'Document is metadata-only and has no stored file' }, 409);
+  }
+
+  const object = await c.env.DOCUMENTS_BUCKET.get(existing.r2_object_key);
+  if (!object || !object.body) {
+    return c.json({ error: 'Stored file not found' }, 404);
+  }
+
+  const filename =
+    object.customMetadata?.originalFilename ??
+    object.customMetadata?.filename ??
+    getFilenameFromObjectKey(existing.r2_object_key);
+
+  const headers = new Headers();
+  headers.set('Content-Type', object.httpMetadata?.contentType || 'application/octet-stream');
+  headers.set('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
+
+  return new Response(object.body, { headers });
 });
 
 bills.delete('/:id/documents/:docId', async (c) => {
@@ -330,20 +451,25 @@ bills.delete('/:id/documents/:docId', async (c) => {
   const docId = Number(c.req.param('docId'));
 
   const [existing] = await db
-    .select({ filename: billDocuments.filename })
-    .from(billDocuments)
-    .where(and(eq(billDocuments.id, docId), eq(billDocuments.bill_id, billId)))
+    .select({ r2_object_key: schema.billDocuments.r2_object_key })
+    .from(schema.billDocuments)
+    .where(and(eq(schema.billDocuments.id, docId), eq(schema.billDocuments.bill_id, billId)))
     .limit(1);
 
   if (!existing) return c.json({ error: 'Document not found' }, 404);
 
-  await db.delete(billDocuments).where(eq(billDocuments.id, docId));
+  if (existing.r2_object_key) {
+    await c.env.DOCUMENTS_BUCKET.delete(existing.r2_object_key);
+  }
 
-  await db.insert(billEvents).values({
+  const removedName = getFilenameFromObjectKey(existing.r2_object_key);
+
+  await db.delete(schema.billDocuments).where(eq(schema.billDocuments.id, docId));
+
+  await db.insert(schema.billEvents).values({
     bill_id: billId,
     event_type: 'document_removed',
-    description: `Document removed: ${existing.filename}`,
-    created_by: 'system',
+    description: `Document removed: ${removedName}`,
   });
 
   return c.json({ success: true });

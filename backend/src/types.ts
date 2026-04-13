@@ -1,5 +1,9 @@
 export interface Env {
   DB: D1Database;
+  DOCUMENTS_BUCKET: R2Bucket;
+  TEAM_DOMAIN?: string;
+  POLICY_AUD?: string;
+  JWT_VALIDATION_DISABLED?: string;
 }
 
 export interface Customer {
@@ -63,11 +67,10 @@ export interface Bill {
 export interface BillDocument {
   id: number;
   bill_id: number;
-  filename: string;
+  filename: string | null;
+  r2_object_key: string;
   content_type: string | null;
   file_size: number | null;
-  document_type: string | null;
-  notes: string | null;
   uploaded_at: string;
 }
 

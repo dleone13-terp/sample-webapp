@@ -1,7 +1,6 @@
 import { Hono } from 'hono';
-import { eq, sql } from 'drizzle-orm';
-import { getDb } from '../db';
-import { customers as customersTable } from '../db/schema';
+import { asc, eq, sql } from 'drizzle-orm';
+import { getDb, schema } from '../db';
 import type { Env } from '../types';
 import type { Customer } from '../types';
 
@@ -10,15 +9,15 @@ const customers = new Hono<{ Bindings: Env }>();
 // GET /api/customers
 customers.get('/', async (c) => {
   const db = getDb(c.env.DB);
-  const results = await db.select().from(customersTable).orderBy(customersTable.name);
-  return c.json(results as Customer[]);
+  const results = await db.select().from(schema.customers).orderBy(asc(schema.customers.name));
+  return c.json(results);
 });
 
 // GET /api/customers/:id
 customers.get('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
-  const [customer] = await db.select().from(customersTable).where(eq(customersTable.id, id)).limit(1);
+  const [customer] = await db.select().from(schema.customers).where(eq(schema.customers.id, id)).limit(1);
 
   if (!customer) return c.json({ error: 'Customer not found' }, 404);
   return c.json(customer as Customer);
@@ -34,7 +33,7 @@ customers.post('/', async (c) => {
   }
 
   const [result] = await db
-    .insert(customersTable)
+    .insert(schema.customers)
     .values({
       name: body.name.trim(),
       email: body.email ?? null,
@@ -49,7 +48,7 @@ customers.post('/', async (c) => {
     })
     .returning();
 
-  return c.json(result as Customer, 201);
+  return c.json(result, 201);
 });
 
 // PUT /api/customers/:id
@@ -63,7 +62,7 @@ customers.put('/:id', async (c) => {
   }
 
   const [result] = await db
-    .update(customersTable)
+    .update(schema.customers)
     .set({
       name: body.name.trim(),
       email: body.email ?? null,
@@ -77,7 +76,7 @@ customers.put('/:id', async (c) => {
       notes: body.notes ?? null,
       updated_at: sql`datetime('now')`,
     })
-    .where(eq(customersTable.id, id))
+    .where(eq(schema.customers.id, id))
     .returning();
 
   if (!result) return c.json({ error: 'Customer not found' }, 404);
@@ -89,11 +88,11 @@ customers.delete('/:id', async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param('id'));
 
-  const [existing] = await db.select({ id: customersTable.id }).from(customersTable).where(eq(customersTable.id, id)).limit(1);
+  const [existing] = await db.select({ id: schema.customers.id }).from(schema.customers).where(eq(schema.customers.id, id)).limit(1);
 
   if (!existing) return c.json({ error: 'Customer not found' }, 404);
 
-  await db.delete(customersTable).where(eq(customersTable.id, id));
+  await db.delete(schema.customers).where(eq(schema.customers.id, id));
   return c.json({ success: true });
 });
 

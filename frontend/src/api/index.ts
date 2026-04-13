@@ -3,8 +3,13 @@ import type { Bill, BillStatus, Customer, BillDocument } from '../types';
 const BASE = '/api';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const isFormData = options?.body instanceof FormData;
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: {
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(options?.headers ?? {}),
+    },
     ...options,
   });
   const data = await res.json();
@@ -48,10 +53,10 @@ export const billsApi = {
       method: 'PUT',
       body: JSON.stringify({ status, description }),
     }),
-  addDocument: (id: number, doc: Partial<BillDocument> & { filename: string }) =>
+  addDocument: (id: number, formData: FormData) =>
     request<BillDocument>(`${BASE}/bills/${id}/documents`, {
       method: 'POST',
-      body: JSON.stringify(doc),
+      body: formData,
     }),
   deleteDocument: (billId: number, docId: number) =>
     request<{ success: boolean }>(`${BASE}/bills/${billId}/documents/${docId}`, {

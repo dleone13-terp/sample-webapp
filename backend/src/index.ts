@@ -1,13 +1,12 @@
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
 import type { Env } from './types';
 import customers from './routes/customers';
 import bills from './routes/bills';
+import { requireCloudflareAccessAuth } from './middleware/accessAuth';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// CORS middleware for development
-app.use('/api/*', cors());
+app.use('/api/*', requireCloudflareAccessAuth);
 
 // API routes
 app.route('/api/customers', customers);
