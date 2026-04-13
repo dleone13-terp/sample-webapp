@@ -126,8 +126,11 @@ npm run dev
 ### Build & Deploy
 
 ```bash
+# Just build
 npm run build     # Build frontend → frontend/dist, then backend dry-run
-npm run deploy    # Build + deploy to Cloudflare Workers
+
+# builds and deploys
+npm run deploy    # Does both, build + deploy to Cloudflare Workers
 ```
 
 ## CI/CD with GitHub Actions
