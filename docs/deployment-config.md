@@ -12,6 +12,7 @@ Reference docs:
 ## Source-of-truth model
 
 - Runtime bindings and environment-specific config are defined in `backend/wrangler.toml`.
+- Worker secrets are synced in CI using `wrangler secret put`; this repo does not use Wrangler's experimental `secrets.required` fields.
 - Single deploy workflow (`.github/workflows/deploy.yml`) selects environment from GitHub context:
   - `push` to `main` -> `production`
   - `pull_request` -> `staging`
@@ -35,8 +36,8 @@ Reference docs:
 | `CF_ACCESS_TEAM_DOMAIN` | production | GitHub Environment variable (`production`) | CI validation + `wrangler secret put TEAM_DOMAIN --env production` | Must start with `https://` and have no trailing slash |
 | `CF_ACCESS_POLICY_AUD` | production | GitHub Environment variable (`production`) | CI validation + `wrangler secret put POLICY_AUD --env production` | Access app audience tag |
 | `JWT_VALIDATION_DISABLED` | staging/prod/local | `backend/wrangler.toml` vars | Worker runtime middleware | `false` in staging/prod, `true` local default |
-| `TEAM_DOMAIN` | staging/prod/local | Worker secret in deployed envs, `.dev.vars` local | Worker runtime middleware | Secret required in Wrangler env config |
-| `POLICY_AUD` | staging/prod/local | Worker secret in deployed envs, `.dev.vars` local | Worker runtime middleware | Secret required in Wrangler env config |
+| `TEAM_DOMAIN` | staging/prod/local | Worker secret in deployed envs, `.dev.vars` local | Worker runtime middleware | Synced by CI (`wrangler secret put`) before deploy |
+| `POLICY_AUD` | staging/prod/local | Worker secret in deployed envs, `.dev.vars` local | Worker runtime middleware | Synced by CI (`wrangler secret put`) before deploy |
 | `DB` D1 binding | staging/prod/local | `backend/wrangler.toml` env-specific `d1_databases` | Worker runtime + migration commands | Non-inheritable, defined per env |
 | `DOCUMENTS_BUCKET` R2 binding | staging/prod/local | `backend/wrangler.toml` env-specific `r2_buckets` | Worker runtime + deploy-time binding validation | Non-inheritable, defined per env |
 

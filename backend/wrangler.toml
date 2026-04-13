@@ -15,9 +15,6 @@ bucket_name = "freight-bill-documents"
 [vars]
 JWT_VALIDATION_DISABLED = "true"
 
-[secrets]
-required = ["TEAM_DOMAIN", "POLICY_AUD"]
-
 [env.production]
 
 name = "freight-bill-tracker"
@@ -33,9 +30,6 @@ database_id = "a0f777a6-ff9f-467f-a306-6474a6845597"
 [[env.production.r2_buckets]]
 binding = "DOCUMENTS_BUCKET"
 bucket_name = "freight-bill-documents-prod"
-
-[env.production.secrets]
-required = ["TEAM_DOMAIN", "POLICY_AUD"]
 
 [env.staging]
 
@@ -54,9 +48,6 @@ database_id = "b8860df5-0f0f-4643-8d22-aa6dfb580b0b"
 [[env.staging.r2_buckets]]
 binding = "DOCUMENTS_BUCKET"
 bucket_name = "freight-bill-documents-staging"
-
-[env.staging.secrets]
-required = ["TEAM_DOMAIN", "POLICY_AUD"]
 
 [assets]
 directory = "../frontend/dist"
